@@ -14,7 +14,7 @@ configured upstream.
 | `LISTEN_ADDR`            | no       | `:8080` | Listen address                       |
 | `CACHE_TTL`              | no       | `336h`  | TTL for validated keys (14 days)     |
 | `CACHE_NEGATIVE_TTL`     | no       | `30s`   | TTL for invalid results              |
-| `CACHE_JANITOR_INTERVAL` | no       | `10m`   | Expired-entry sweep interval         |
+| `CACHE_JANITOR_INTERVAL` | no       | `1m`    | Expired-entry sweep interval         |
 
 ## Run
 

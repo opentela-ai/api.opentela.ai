@@ -47,7 +47,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	janitor, err := durationEnv("CACHE_JANITOR_INTERVAL", 10*time.Minute)
+	janitor, err := durationEnv("CACHE_JANITOR_INTERVAL", 1*time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +77,9 @@ func durationEnv(key string, def time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(v)
 	if err != nil {
 		return 0, fmt.Errorf("%s is invalid: %w", key, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %q", key, v)
 	}
 	return d, nil
 }

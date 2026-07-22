@@ -30,8 +30,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.CacheNegTTL != 30*time.Second {
 		t.Errorf("CacheNegTTL = %v, want 30s", cfg.CacheNegTTL)
 	}
-	if cfg.JanitorEvery != 10*time.Minute {
-		t.Errorf("JanitorEvery = %v, want 10m", cfg.JanitorEvery)
+	if cfg.JanitorEvery != 1*time.Minute {
+		t.Errorf("JanitorEvery = %v, want 1m", cfg.JanitorEvery)
 	}
 }
 
@@ -50,6 +50,28 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.CacheTTL != time.Hour {
 		t.Errorf("CacheTTL = %v, want 1h", cfg.CacheTTL)
+	}
+}
+
+func TestLoadRejectsNonPositiveDuration(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("CACHE_TTL", "0s")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for CACHE_TTL=0s, got nil")
+	}
+	t.Setenv("CACHE_TTL", "-1h")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for negative CACHE_TTL, got nil")
+	}
+}
+
+func TestLoadRejectsMalformedDuration(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("CACHE_NEGATIVE_TTL", "notaduration")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for malformed CACHE_NEGATIVE_TTL, got nil")
 	}
 }
 
