@@ -21,6 +21,8 @@ type Cache struct {
 
 	stop chan struct{}
 	done chan struct{}
+
+	closeOnce sync.Once
 }
 
 // New creates a Cache. If janitorEvery > 0, a background goroutine evicts expired
@@ -41,11 +43,22 @@ func New(janitorEvery time.Duration) *Cache {
 }
 
 // Get returns the cached value and whether a live (non-expired) entry exists.
+// An expired entry is treated as a miss and removed from the map.
 func (c *Cache) Get(key string) (bool, bool) {
 	c.mu.RLock()
 	e, ok := c.data[key]
 	c.mu.RUnlock()
-	if !ok || c.now().After(e.expiresAt) {
+	if !ok {
+		return false, false
+	}
+	if c.now().After(e.expiresAt) {
+		// Expired. Delete under the write lock, but only if the entry is still
+		// present and still expired — a concurrent Set may have refreshed it.
+		c.mu.Lock()
+		if cur, present := c.data[key]; present && c.now().After(cur.expiresAt) {
+			delete(c.data, key)
+		}
+		c.mu.Unlock()
 		return false, false
 	}
 	return e.val, true
@@ -65,10 +78,12 @@ func (c *Cache) Len() int {
 	return len(c.data)
 }
 
-// Close stops the janitor goroutine. Safe to call once.
+// Close stops the janitor goroutine. Safe to call more than once.
 func (c *Cache) Close() {
-	close(c.stop)
-	<-c.done
+	c.closeOnce.Do(func() {
+		close(c.stop)
+		<-c.done
+	})
 }
 
 func (c *Cache) janitor(every time.Duration) {

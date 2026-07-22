@@ -79,6 +79,27 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestGetDeletesExpiredEntry(t *testing.T) {
+	c := New(0)
+	defer c.Close()
+	base := time.Unix(1000, 0)
+	c.now = func() time.Time { return base }
+	c.Set("k", true, time.Minute)
+	c.now = func() time.Time { return base.Add(2 * time.Minute) }
+	if _, ok := c.Get("k"); ok {
+		t.Fatal("Get on expired entry returned ok=true, want false")
+	}
+	if c.Len() != 0 {
+		t.Fatalf("Get should have evicted the expired entry, Len=%d want 0", c.Len())
+	}
+}
+
+func TestDoubleCloseIsSafe(t *testing.T) {
+	c := New(5 * time.Millisecond)
+	c.Close()
+	c.Close() // must not panic
+}
+
 func TestJanitorEvictsExpiredEntries(t *testing.T) {
 	c := New(5 * time.Millisecond)
 	defer c.Close()
