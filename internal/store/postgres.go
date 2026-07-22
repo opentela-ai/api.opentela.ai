@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,11 +18,11 @@ type Postgres struct {
 func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("store: connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, err
+		return nil, fmt.Errorf("store: ping: %w", err)
 	}
 	return &Postgres{pool: pool}, nil
 }
@@ -32,7 +33,10 @@ func (p *Postgres) Close() { p.pool.Close() }
 // Migrate executes an arbitrary DDL string (used to apply migration files).
 func (p *Postgres) Migrate(ctx context.Context, ddl string) error {
 	_, err := p.pool.Exec(ctx, ddl)
-	return err
+	if err != nil {
+		return fmt.Errorf("store: migrate: %w", err)
+	}
+	return nil
 }
 
 // Validate reports whether an active key exists for the given hash.
@@ -44,7 +48,7 @@ func (p *Postgres) Validate(ctx context.Context, keyHash string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("store: validate: %w", err)
 	}
 	return active, nil
 }
@@ -53,7 +57,10 @@ func (p *Postgres) Validate(ctx context.Context, keyHash string) (bool, error) {
 func (p *Postgres) Insert(ctx context.Context, keyHash, name string) error {
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO api_keys (key_hash, name) VALUES ($1, $2)`, keyHash, name)
-	return err
+	if err != nil {
+		return fmt.Errorf("store: insert: %w", err)
+	}
+	return nil
 }
 
 // Revoke marks a key inactive. It reports whether a row was changed.
@@ -62,7 +69,7 @@ func (p *Postgres) Revoke(ctx context.Context, keyHash string) (bool, error) {
 		`UPDATE api_keys SET active = FALSE, revoked_at = now()
 		 WHERE key_hash = $1 AND active = TRUE`, keyHash)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("store: revoke: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
 }
@@ -73,7 +80,7 @@ func (p *Postgres) List(ctx context.Context) ([]KeyInfo, error) {
 		`SELECT key_hash, COALESCE(name, ''), active, created_at, revoked_at
 		 FROM api_keys ORDER BY created_at`)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("store: list query: %w", err)
 	}
 	defer rows.Close()
 
@@ -81,9 +88,12 @@ func (p *Postgres) List(ctx context.Context) ([]KeyInfo, error) {
 	for rows.Next() {
 		var k KeyInfo
 		if err := rows.Scan(&k.KeyHash, &k.Name, &k.Active, &k.CreatedAt, &k.RevokedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("store: list scan: %w", err)
 		}
 		out = append(out, k)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list rows: %w", err)
+	}
+	return out, nil
 }
