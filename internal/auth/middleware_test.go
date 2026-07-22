@@ -1,0 +1,78 @@
+package auth
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+type stubValidator struct {
+	valid    bool
+	err      error
+	gotToken string
+}
+
+func (s *stubValidator) Valid(_ context.Context, token string) (bool, error) {
+	s.gotToken = token
+	return s.valid, s.err
+}
+
+func nextOK() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("passed"))
+	})
+}
+
+func doRequest(t *testing.T, v TokenValidator, header string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := Middleware(v)(nextOK())
+	req := httptest.NewRequest(http.MethodGet, "/anything", nil)
+	if header != "" {
+		req.Header.Set("Authorization", header)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestMiddlewareMissingHeader(t *testing.T) {
+	rec := doRequest(t, &stubValidator{valid: true}, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", rec.Code)
+	}
+}
+
+func TestMiddlewareMalformedHeader(t *testing.T) {
+	rec := doRequest(t, &stubValidator{valid: true}, "Basic abc")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", rec.Code)
+	}
+}
+
+func TestMiddlewareInvalidKey(t *testing.T) {
+	rec := doRequest(t, &stubValidator{valid: false}, "Bearer nope")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", rec.Code)
+	}
+}
+
+func TestMiddlewareStoreError(t *testing.T) {
+	rec := doRequest(t, &stubValidator{err: errors.New("db down")}, "Bearer x")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code = %d, want 503", rec.Code)
+	}
+}
+
+func TestMiddlewareValidPassesToken(t *testing.T) {
+	sv := &stubValidator{valid: true}
+	rec := doRequest(t, sv, "Bearer secret-token")
+	if rec.Code != http.StatusOK || rec.Body.String() != "passed" {
+		t.Fatalf("code=%d body=%q, want 200/passed", rec.Code, rec.Body.String())
+	}
+	if sv.gotToken != "secret-token" {
+		t.Fatalf("validator got token %q, want secret-token", sv.gotToken)
+	}
+}
