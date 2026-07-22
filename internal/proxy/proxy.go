@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -18,7 +19,8 @@ func New(target *url.URL) *httputil.ReverseProxy {
 			r.SetURL(target)  // routes to target scheme/host, joins base path, sets Host to target
 			r.SetXForwarded() // sets X-Forwarded-For/Host/Proto
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("proxy: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
