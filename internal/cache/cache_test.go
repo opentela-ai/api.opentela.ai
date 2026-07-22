@@ -78,3 +78,18 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestJanitorEvictsExpiredEntries(t *testing.T) {
+	c := New(5 * time.Millisecond)
+	defer c.Close()
+	c.Set("k", true, 1*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.Len() == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("janitor did not evict expired entry within timeout, Len = %d", c.Len())
+}
