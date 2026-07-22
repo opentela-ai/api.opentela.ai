@@ -76,3 +76,17 @@ func TestMiddlewareValidPassesToken(t *testing.T) {
 		t.Fatalf("validator got token %q, want secret-token", sv.gotToken)
 	}
 }
+
+func TestMiddlewareSchemeCaseInsensitive(t *testing.T) {
+	rec := doRequest(t, &stubValidator{valid: true}, "BEARER secret-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+}
+
+func TestMiddlewareEmptyToken(t *testing.T) {
+	rec := doRequest(t, &stubValidator{valid: true}, "Bearer ")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401", rec.Code)
+	}
+}
