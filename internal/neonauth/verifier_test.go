@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,6 +22,19 @@ func jwksServer(t *testing.T, pub ed25519.PublicKey) *httptest.Server {
 		"x": base64.RawURLEncoding.EncodeToString(pub),
 	}}})
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+}
+
+// jwksServerCounting serves the JWKS for pub under testKID and counts requests.
+func jwksServerCounting(t *testing.T, pub ed25519.PublicKey, count *int64) *httptest.Server {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"keys": []map[string]string{{
+		"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "kid": testKID,
+		"x": base64.RawURLEncoding.EncodeToString(pub),
+	}}})
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(count, 1)
 		_, _ = w.Write(body)
 	}))
 }
@@ -110,6 +124,31 @@ func TestVerifyAudience(t *testing.T) {
 	// Audience required and correct → accept.
 	if _, err := v.Verify(context.Background(), signJWT(priv, hdr, mutate(validClaims(), "aud", "my-api"))); err != nil {
 		t.Fatalf("Verify with correct aud: %v", err)
+	}
+}
+
+func TestUnknownKidRefreshIsRateLimited(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	var fetches int64
+	srv := jwksServerCounting(t, pub, &fetches)
+	defer srv.Close()
+	v := newVerifier(t, srv, "") // fixed now via the test helper
+	v.minRefresh = time.Minute
+
+	// One valid call populates the cache (fetch #1).
+	good := signJWT(priv, map[string]any{"alg": "EdDSA", "kid": testKID, "typ": "JWT"}, validClaims())
+	if _, err := v.Verify(context.Background(), good); err != nil {
+		t.Fatalf("valid Verify: %v", err)
+	}
+	// A flood of unknown-kid tokens (same fixed now) must NOT trigger more fetches.
+	for i := 0; i < 5; i++ {
+		bad := signJWT(priv, map[string]any{"alg": "EdDSA", "kid": "random-kid", "typ": "JWT"}, validClaims())
+		if _, err := v.Verify(context.Background(), bad); err == nil {
+			t.Fatal("Verify with unknown kid: want rejection")
+		}
+	}
+	if n := atomic.LoadInt64(&fetches); n != 1 {
+		t.Fatalf("JWKS fetched %d times, want 1 (unknown-kid refreshes must be rate-limited)", n)
 	}
 }
 

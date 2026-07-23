@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -36,17 +37,21 @@ type Verifier struct {
 	mu        sync.Mutex
 	keys      map[string]ed25519.PublicKey // kid -> public key
 	fetchedAt time.Time
+
+	minRefresh  time.Duration // min interval between unknown-kid-triggered refreshes
+	lastRefresh time.Time     // time of the last refresh attempt (success or failure)
 }
 
 // New builds a Verifier. audience is enforced only when non-empty.
 func New(jwksURL, issuer, audience string, cacheTTL time.Duration) *Verifier {
 	return &Verifier{
-		jwksURL:  jwksURL,
-		issuer:   issuer,
-		audience: audience,
-		cacheTTL: cacheTTL,
-		now:      time.Now,
-		client:   &http.Client{Timeout: 10 * time.Second},
+		jwksURL:    jwksURL,
+		issuer:     issuer,
+		audience:   audience,
+		cacheTTL:   cacheTTL,
+		now:        time.Now,
+		client:     &http.Client{Timeout: 10 * time.Second},
+		minRefresh: time.Minute,
 	}
 }
 
@@ -163,8 +168,14 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (ed25519.PublicKey, e
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	stale := v.keys == nil || v.now().Sub(v.fetchedAt) > v.cacheTTL
-	if _, ok := v.keys[kid]; !ok || stale {
+	now := v.now()
+	_, have := v.keys[kid]
+	stale := v.keys == nil || now.Sub(v.fetchedAt) > v.cacheTTL
+	// Refresh when the cache is stale, or when the kid is unknown AND we have not
+	// attempted a refresh within minRefresh — so a flood of tokens bearing random
+	// kids cannot force one upstream fetch each.
+	if stale || (!have && now.Sub(v.lastRefresh) >= v.minRefresh) {
+		v.lastRefresh = now
 		if err := v.refreshLocked(ctx); err != nil {
 			// Serve a cached key if we still have one; otherwise fail.
 			if k, ok := v.keys[kid]; ok {
@@ -189,6 +200,8 @@ type jwksDoc struct {
 	} `json:"keys"`
 }
 
+const maxJWKSBytes = 1 << 20 // 1 MiB
+
 func (v *Verifier) refreshLocked(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, nil)
 	if err != nil {
@@ -203,7 +216,7 @@ func (v *Verifier) refreshLocked(ctx context.Context) error {
 		return fmt.Errorf("neonauth: jwks status %d", resp.StatusCode)
 	}
 	var doc jwksDoc
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJWKSBytes)).Decode(&doc); err != nil {
 		return fmt.Errorf("neonauth: jwks decode: %w", err)
 	}
 	keys := make(map[string]ed25519.PublicKey)
