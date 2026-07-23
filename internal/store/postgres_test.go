@@ -30,6 +30,13 @@ func newTestStore(t *testing.T) *Postgres {
 	if err := p.Migrate(ctx, string(ddl)); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	ddl2, err := os.ReadFile("../../migrations/0002_user_keys.sql")
+	if err != nil {
+		t.Fatalf("read migration 0002: %v", err)
+	}
+	if err := p.Migrate(ctx, string(ddl2)); err != nil {
+		t.Fatalf("migrate 0002: %v", err)
+	}
 	return p
 }
 
@@ -67,5 +74,56 @@ func TestPostgresValidateLifecycle(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Name != "alice" || rows[0].Active {
 		t.Fatalf("List = %+v, want one inactive row named alice", rows)
+	}
+}
+
+func TestPostgresUserKeyLifecycle(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	const alice, bob = "user-alice", "user-bob"
+
+	if n, err := p.CountActiveByUser(ctx, alice); err != nil || n != 0 {
+		t.Fatalf("CountActiveByUser(empty) = (%d,%v), want (0,nil)", n, err)
+	}
+
+	info, err := p.InsertUserKey(ctx, alice, HashKey("tok-a"), "laptop", "sk-1a2b3c4d")
+	if err != nil {
+		t.Fatalf("InsertUserKey: %v", err)
+	}
+	if info.ID == 0 || info.Name != "laptop" || info.Prefix != "sk-1a2b3c4d" || !info.Active {
+		t.Fatalf("InsertUserKey returned %+v", info)
+	}
+	if info.CreatedAt.IsZero() {
+		t.Fatal("InsertUserKey CreatedAt is zero")
+	}
+
+	// The inserted key validates through the existing proxy path.
+	if ok, err := p.Validate(ctx, HashKey("tok-a")); err != nil || !ok {
+		t.Fatalf("Validate(new user key) = (%v,%v), want (true,nil)", ok, err)
+	}
+
+	// Listing is owner-scoped and never leaks another user's keys.
+	if _, err := p.InsertUserKey(ctx, bob, HashKey("tok-b"), "bob-key", "sk-9999abcd"); err != nil {
+		t.Fatalf("InsertUserKey(bob): %v", err)
+	}
+	rows, err := p.ListByUser(ctx, alice)
+	if err != nil {
+		t.Fatalf("ListByUser: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != info.ID || rows[0].Prefix != "sk-1a2b3c4d" {
+		t.Fatalf("ListByUser(alice) = %+v, want only alice's key", rows)
+	}
+
+	// Bob cannot revoke Alice's key.
+	if changed, err := p.RevokeByIDForUser(ctx, bob, info.ID); err != nil || changed {
+		t.Fatalf("RevokeByIDForUser(bob, alice's id) = (%v,%v), want (false,nil)", changed, err)
+	}
+	// Alice can.
+	if changed, err := p.RevokeByIDForUser(ctx, alice, info.ID); err != nil || !changed {
+		t.Fatalf("RevokeByIDForUser(alice) = (%v,%v), want (true,nil)", changed, err)
+	}
+	// Revoked keys drop out of the active count.
+	if n, err := p.CountActiveByUser(ctx, alice); err != nil || n != 0 {
+		t.Fatalf("CountActiveByUser(after revoke) = (%d,%v), want (0,nil)", n, err)
 	}
 }

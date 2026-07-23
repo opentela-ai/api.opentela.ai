@@ -21,10 +21,14 @@ type KeyStore interface {
 	Validate(ctx context.Context, keyHash string) (bool, error)
 }
 
-// KeyInfo is a row of the api_keys table, used by administrative listing.
+// KeyInfo is a row of the api_keys table. ID, Prefix, and UserID are populated
+// by the user-scoped queries; the admin List (by hash) leaves them zero.
 type KeyInfo struct {
+	ID        int64
 	KeyHash   string
+	UserID    *string
 	Name      string
+	Prefix    string
 	Active    bool
 	CreatedAt time.Time
 	RevokedAt *time.Time

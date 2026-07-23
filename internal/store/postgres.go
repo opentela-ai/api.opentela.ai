@@ -97,3 +97,72 @@ func (p *Postgres) List(ctx context.Context) ([]KeyInfo, error) {
 	}
 	return out, nil
 }
+
+// InsertUserKey adds a new active key owned by userID and returns the stored row.
+func (p *Postgres) InsertUserKey(ctx context.Context, userID, keyHash, name, prefix string) (KeyInfo, error) {
+	var info KeyInfo
+	err := p.pool.QueryRow(ctx,
+		`INSERT INTO api_keys (user_id, key_hash, name, key_prefix, active)
+		 VALUES ($1, $2, $3, $4, TRUE)
+		 RETURNING id, created_at`,
+		userID, keyHash, name, prefix).Scan(&info.ID, &info.CreatedAt)
+	if err != nil {
+		return KeyInfo{}, fmt.Errorf("store: insert user key: %w", err)
+	}
+	uid := userID
+	info.UserID = &uid
+	info.KeyHash = keyHash
+	info.Name = name
+	info.Prefix = prefix
+	info.Active = true
+	return info, nil
+}
+
+// ListByUser returns userID's keys (active and revoked), newest first. It never
+// returns the key hash beyond the display prefix.
+func (p *Postgres) ListByUser(ctx context.Context, userID string) ([]KeyInfo, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, COALESCE(name, ''), COALESCE(key_prefix, ''), active, created_at, revoked_at
+		 FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list by user query: %w", err)
+	}
+	defer rows.Close()
+
+	uid := userID
+	var out []KeyInfo
+	for rows.Next() {
+		k := KeyInfo{UserID: &uid}
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Active, &k.CreatedAt, &k.RevokedAt); err != nil {
+			return nil, fmt.Errorf("store: list by user scan: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list by user rows: %w", err)
+	}
+	return out, nil
+}
+
+// RevokeByIDForUser marks one of userID's keys inactive. It reports whether a row
+// changed; a mismatched owner or unknown id changes nothing (reported as false).
+func (p *Postgres) RevokeByIDForUser(ctx context.Context, userID string, id int64) (bool, error) {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE api_keys SET active = FALSE, revoked_at = now()
+		 WHERE id = $1 AND user_id = $2 AND active = TRUE`, id, userID)
+	if err != nil {
+		return false, fmt.Errorf("store: revoke by id: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// CountActiveByUser returns how many active keys userID currently holds.
+func (p *Postgres) CountActiveByUser(ctx context.Context, userID string) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM api_keys WHERE user_id = $1 AND active = TRUE`, userID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count active: %w", err)
+	}
+	return n, nil
+}
