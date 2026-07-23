@@ -64,6 +64,19 @@ func TestMiddlewareRejects(t *testing.T) {
 	}
 }
 
+func TestMiddlewareEmptySubjectRejected(t *testing.T) {
+	// Verify succeeds (no error) but returns an empty subject → must be 401.
+	h := Middleware(fakeVerifier{sub: ""})(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	req := httptest.NewRequest(http.MethodGet, "/manage/keys", nil)
+	req.Header.Set("Authorization", "Bearer good.jwt.token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d, want 401 for empty subject", rec.Code)
+	}
+}
+
 func TestCORSPreflightAndEcho(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := CORS([]string{"https://app.example"})(next)

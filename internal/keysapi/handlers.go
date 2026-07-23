@@ -23,6 +23,9 @@ type Service interface {
 	Revoke(ctx context.Context, userID string, id int64) (bool, error)
 }
 
+// *keysvc.Service must satisfy Service; catch drift at compile time.
+var _ Service = (*keysvc.Service)(nil)
+
 type createRequest struct {
 	Name string `json:"name"`
 }

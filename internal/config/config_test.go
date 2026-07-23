@@ -125,6 +125,24 @@ func TestLoadKeyMgmtPartialIsError(t *testing.T) {
 	}
 }
 
+func TestLoadKeyMgmtPartialIssuerOnlyIsError(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("NEON_AUTH_ISSUER", "https://auth") // jwks url missing
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error when only NEON_AUTH_ISSUER is set")
+	}
+}
+
+func TestLoadRejectsNonIntegerMaxKeys(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("MAX_KEYS_PER_USER", "abc")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for non-integer MAX_KEYS_PER_USER")
+	}
+}
+
 func TestLoadRejectsNonPositiveMaxKeys(t *testing.T) {
 	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
 	t.Setenv("DATABASE_URL", "postgres://x")
