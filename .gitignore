@@ -1,0 +1,9 @@
+.neon
+
+# Local environment files (contain Neon DATABASE_URL secret)
+.env
+.env.local
+.env.*.local
+
+# SDD scratch (briefs, reports, ledger, diffs)
+.superpowers/

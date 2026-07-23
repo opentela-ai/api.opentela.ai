@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.local
+.env.*.local
+.neon
+.superpowers
+.claude
+.agents
+docs
+skills-lock.json
+Dockerfile
+.dockerignore
+fly.toml
+README.md

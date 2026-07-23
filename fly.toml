@@ -1,0 +1,29 @@
+# Fly.io config for the opentela authenticating reverse proxy.
+# Secrets (DATABASE_URL, OPENTELA_UPSTREAM_URL, NEON_AUTH_JWKS_URL,
+# NEON_AUTH_ISSUER) are set via `flyctl secrets set`, not here.
+app = "opentela-api"
+primary_region = "fra"  # nearest to the Neon DB (aws eu-central-1)
+
+[build]
+
+[deploy]
+  # Apply migrations 0001+0002 (idempotent) before each release goes live.
+  release_command = "/app/keyctl migrate"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "3s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
