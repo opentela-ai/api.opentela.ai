@@ -163,7 +163,10 @@ func contains(hay []string, needle string) bool {
 }
 
 // keyFor returns the public key for kid, refreshing the JWKS if the cache is
-// stale or the kid is unknown (one refresh, to absorb key rotation).
+// stale or the kid is unknown. Unknown-kid refreshes are rate-limited to at most
+// one per minRefresh so a flood of random kids cannot force one fetch each; a
+// genuinely rotated kid is absorbed at the next minRefresh boundary (or sooner
+// once the cache passes cacheTTL).
 func (v *Verifier) keyFor(ctx context.Context, kid string) (ed25519.PublicKey, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
