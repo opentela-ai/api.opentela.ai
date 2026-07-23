@@ -12,12 +12,13 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 
+	"github.com/opentela-ai/api/internal/keysvc"
 	"github.com/opentela-ai/api/internal/store"
 )
 
@@ -59,14 +60,24 @@ func run(args []string) error {
 }
 
 func cmdMigrate(ctx context.Context, pg *store.Postgres) error {
-	ddl, err := os.ReadFile("migrations/0001_init.sql")
+	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
-		return fmt.Errorf("read migration (run from repo root): %w", err)
+		return fmt.Errorf("find migrations (run from repo root): %w", err)
 	}
-	if err := pg.Migrate(ctx, string(ddl)); err != nil {
-		return err
+	if len(files) == 0 {
+		return fmt.Errorf("no migrations found (run from repo root)")
 	}
-	fmt.Println("migration applied")
+	sort.Strings(files)
+	for _, f := range files {
+		ddl, err := os.ReadFile(f)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", f, err)
+		}
+		if err := pg.Migrate(ctx, string(ddl)); err != nil {
+			return fmt.Errorf("apply %s: %w", f, err)
+		}
+		fmt.Printf("applied %s\n", f)
+	}
 	return nil
 }
 
@@ -76,7 +87,7 @@ func cmdAdd(ctx context.Context, pg *store.Postgres, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	token, err := generateToken()
+	token, err := keysvc.GenerateToken()
 	if err != nil {
 		return err
 	}
@@ -126,13 +137,4 @@ func cmdList(ctx context.Context, pg *store.Postgres) error {
 			prefix, k.Name, status, k.CreatedAt.Format("2006-01-02"))
 	}
 	return nil
-}
-
-// generateToken returns a random opaque token of the form "sk-<48 hex chars>".
-func generateToken() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "sk-" + hex.EncodeToString(b), nil
 }

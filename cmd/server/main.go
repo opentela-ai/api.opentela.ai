@@ -13,6 +13,9 @@ import (
 	"github.com/opentela-ai/api/internal/auth"
 	"github.com/opentela-ai/api/internal/cache"
 	"github.com/opentela-ai/api/internal/config"
+	"github.com/opentela-ai/api/internal/keysapi"
+	"github.com/opentela-ai/api/internal/keysvc"
+	"github.com/opentela-ai/api/internal/neonauth"
 	"github.com/opentela-ai/api/internal/proxy"
 	"github.com/opentela-ai/api/internal/server"
 	"github.com/opentela-ai/api/internal/store"
@@ -43,7 +46,15 @@ func run() error {
 	defer c.Close()
 
 	validator := auth.NewValidator(pg, c, cfg.CacheTTL, cfg.CacheNegTTL)
-	handler := server.New(validator, proxy.New(cfg.UpstreamURL))
+
+	var keyMgmt http.Handler
+	if cfg.KeyMgmtEnabled {
+		verifier := neonauth.New(cfg.NeonAuthJWKSURL, cfg.NeonAuthIssuer, cfg.NeonAuthAudience, cfg.JWKSCacheTTL)
+		svc := keysvc.New(pg, cfg.MaxKeysPerUser)
+		keyMgmt = keysapi.Router(svc, verifier, cfg.CORSAllowedOrigins)
+		log.Printf("key management enabled at /manage/keys (issuer %s)", cfg.NeonAuthIssuer)
+	}
+	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
