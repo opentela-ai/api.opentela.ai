@@ -82,3 +82,54 @@ func TestLoadMissingRequired(t *testing.T) {
 		t.Fatal("Load() expected error when required vars missing, got nil")
 	}
 }
+
+func TestLoadKeyMgmtDisabledByDefault(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyMgmtEnabled {
+		t.Fatal("KeyMgmtEnabled should be false when Neon Auth is unset")
+	}
+	if cfg.MaxKeysPerUser != 10 || cfg.JWKSCacheTTL != time.Hour {
+		t.Fatalf("defaults wrong: max=%d ttl=%s", cfg.MaxKeysPerUser, cfg.JWKSCacheTTL)
+	}
+}
+
+func TestLoadKeyMgmtEnabled(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("NEON_AUTH_JWKS_URL", "https://auth/jwks")
+	t.Setenv("NEON_AUTH_ISSUER", "https://auth")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://a.example, https://b.example")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.KeyMgmtEnabled {
+		t.Fatal("KeyMgmtEnabled should be true")
+	}
+	if len(cfg.CORSAllowedOrigins) != 2 || cfg.CORSAllowedOrigins[1] != "https://b.example" {
+		t.Fatalf("CORS origins = %v", cfg.CORSAllowedOrigins)
+	}
+}
+
+func TestLoadKeyMgmtPartialIsError(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("NEON_AUTH_JWKS_URL", "https://auth/jwks") // issuer missing
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error when only one Neon Auth var is set")
+	}
+}
+
+func TestLoadRejectsNonPositiveMaxKeys(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("MAX_KEYS_PER_USER", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for MAX_KEYS_PER_USER=0")
+	}
+}

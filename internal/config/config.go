@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +18,16 @@ type Config struct {
 	CacheTTL     time.Duration
 	CacheNegTTL  time.Duration
 	JanitorEvery time.Duration
+
+	// Key-management plane (optional). Enabled only when both NeonAuthJWKSURL and
+	// NeonAuthIssuer are set.
+	NeonAuthJWKSURL    string
+	NeonAuthIssuer     string
+	NeonAuthAudience   string
+	JWKSCacheTTL       time.Duration
+	MaxKeysPerUser     int
+	CORSAllowedOrigins []string
+	KeyMgmtEnabled     bool
 }
 
 // Load reads configuration from environment variables, applies defaults, and
@@ -52,6 +64,28 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	jwksTTL, err := durationEnv("NEON_AUTH_JWKS_CACHE_TTL", time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	maxKeys, err := intEnv("MAX_KEYS_PER_USER", 10)
+	if err != nil {
+		return nil, err
+	}
+	jwksURL := os.Getenv("NEON_AUTH_JWKS_URL")
+	issuer := os.Getenv("NEON_AUTH_ISSUER")
+	if (jwksURL == "") != (issuer == "") {
+		return nil, fmt.Errorf("NEON_AUTH_JWKS_URL and NEON_AUTH_ISSUER must be set together")
+	}
+	var corsOrigins []string
+	if raw := os.Getenv("CORS_ALLOWED_ORIGINS"); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				corsOrigins = append(corsOrigins, o)
+			}
+		}
+	}
+
 	return &Config{
 		UpstreamURL:  upstream,
 		DatabaseURL:  dbURL,
@@ -59,6 +93,14 @@ func Load() (*Config, error) {
 		CacheTTL:     cacheTTL,
 		CacheNegTTL:  negTTL,
 		JanitorEvery: janitor,
+
+		NeonAuthJWKSURL:    jwksURL,
+		NeonAuthIssuer:     issuer,
+		NeonAuthAudience:   os.Getenv("NEON_AUTH_AUDIENCE"),
+		JWKSCacheTTL:       jwksTTL,
+		MaxKeysPerUser:     maxKeys,
+		CORSAllowedOrigins: corsOrigins,
+		KeyMgmtEnabled:     jwksURL != "" && issuer != "",
 	}, nil
 }
 
@@ -82,4 +124,19 @@ func durationEnv(key string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be positive, got %q", key, v)
 	}
 	return d, nil
+}
+
+func intEnv(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s is invalid: %w", key, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s must be positive, got %q", key, v)
+	}
+	return n, nil
 }
