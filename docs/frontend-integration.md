@@ -68,14 +68,13 @@ calls will fail** (CORS error or `401`).
    neon neon-auth domain allow-localhost      # for local dev
    ```
 
-3. **Confirm the JWT issuer.** The backend verifies the JWT's `iss` claim exactly
-   against `NEON_AUTH_ISSUER`, currently set to the Neon Auth base URL
-   `https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech/neondb/auth`
-   (Better Auth's default `iss`). If real logins get `401` from `/manage/keys`,
-   decode a real token's `iss` and fix it:
-   ```bash
-   flyctl secrets set NEON_AUTH_ISSUER="<iss from a real token>" -a opentela-api
-   ```
+3. **JWT issuer — already set (verified).** The backend verifies the JWT's `iss`
+   exactly against `NEON_AUTH_ISSUER`, which is
+   `https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech` — the
+   **host only, not** the `/neondb/auth` path. (Better Auth sets `iss`/`aud` to the
+   host; the `/neondb/auth` base is only where the auth *endpoints* live, i.e.
+   `NEON_AUTH_BASE_URL` / `VITE_NEON_AUTH_URL`.) Confirmed end-to-end with a real
+   token, so no action needed unless Neon rotates the auth host.
 
 ---
 
@@ -222,3 +221,30 @@ allowed headers `Authorization, Content-Type`; origins per `CORS_ALLOWED_ORIGINS
   revoking frees a slot. Configurable via `MAX_KEYS_PER_USER` on the backend.
 - **Don't send the JWT to `/v1/…`, and don't send `sk-…` to `/manage/…`.** They
   are validated by different mechanisms on different paths.
+
+---
+
+## Appendix — getting a JWT without a frontend (testing/CI)
+
+You don't need the app to obtain a real JWT — hit the Neon Auth (Better Auth)
+endpoints directly. The request must carry an `Origin` header matching a trusted
+domain (prereq #2), e.g. `http://localhost:3000`:
+
+```bash
+BASE="https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech/neondb/auth"
+JAR=$(mktemp)
+
+# 1. Create a user once (or POST /sign-in/email for an existing one):
+curl -sS -c "$JAR" -X POST "$BASE/sign-up/email" \
+  -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+  -d '{"email":"you@example.com","password":"<pw>","name":"You","callbackURL":"http://localhost:3000/"}'
+
+# 2. Exchange the session cookie for a JWT:
+curl -sS -b "$JAR" -H 'Origin: http://localhost:3000' "$BASE/token"
+# -> {"token":"eyJ…"}   (EdDSA, ~15 min lifetime)
+```
+
+Send that `token` as `Authorization: Bearer <token>` to `/manage/keys`. In the
+app, `authClient.token()` returns the same thing. The token's `iss`/`aud` is the
+**host** `https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech`
+and `sub` is the Neon Auth user id (the key owner).
