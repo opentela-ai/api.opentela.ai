@@ -13,10 +13,14 @@ import (
 //
 //   - /healthz is unauthenticated.
 //   - /manage/ is the key-management plane (its own CORS + JWT auth), when non-nil.
-//   - GET /v1/models[/{id}] is public: the catalogue of what the mesh serves is
-//     the permissionless surface, so it is readable without holding a key.
-//     Only these reads are open — every other /v1 path (chat completions and
-//     anything else that costs GPU time) stays behind the API-key middleware.
+//   - The catalogue of what the mesh serves is the permissionless surface, so it
+//     is readable without a key: GET /v1/dnt/table (the node table, which lists
+//     every peer's services and their identity groups) and
+//     GET /v1/service/{service}/v1/models (one service's models). Both are reads
+//     the upstream already serves unauthenticated.
+//     Only these reads are open — every other /v1 path, including anything else
+//     under /v1/service/{service}/ that spends GPU time, stays behind the
+//     API-key middleware.
 //   - Everything else is the API-key-gated proxy.
 //
 // Both proxy planes are wrapped with CORS so browsers can call them
@@ -33,8 +37,8 @@ func New(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, corsOr
 	}
 
 	cors := corsmw.Middleware(corsOrigins)
-	mux.Handle("GET /v1/models", cors(proxy))
-	mux.Handle("GET /v1/models/{id}", cors(proxy))
+	mux.Handle("GET /v1/dnt/table", cors(proxy))
+	mux.Handle("GET /v1/service/{service}/v1/models", cors(proxy))
 	mux.Handle("/", cors(auth.Middleware(v)(proxy)))
 	return mux
 }

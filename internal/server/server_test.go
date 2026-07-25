@@ -99,7 +99,7 @@ func TestProxyPreflightBypassesAuth(t *testing.T) {
 // header on the response so the browser can read it.
 func TestProxyCORSHeaderOnValidRequest(t *testing.T) {
 	h := New(stubValidator{valid: true}, proxyStub(), nil, []string{"https://app.example"})
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dnt/table", nil)
 	req.Header.Set("Origin", "https://app.example")
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
@@ -131,11 +131,15 @@ func TestProxyNoCORSForDisallowedOrigin(t *testing.T) {
 	}
 }
 
-// The model catalogue is the permissionless surface: readable with no key.
-func TestModelsListIsPublic(t *testing.T) {
+// The catalogue is the permissionless surface: readable with no key.
+func TestCatalogueIsPublic(t *testing.T) {
 	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
 
-	for _, path := range []string{"/v1/models", "/v1/models/Qwen%2FQwen3-8B"} {
+	for _, path := range []string{
+		"/v1/dnt/table",
+		"/v1/service/llm/v1/models",
+		"/v1/service/flash-sandbox/v1/models",
+	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
@@ -152,11 +156,15 @@ func TestOnlyModelReadsArePublic(t *testing.T) {
 	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
 
 	cases := []struct{ method, path string }{
-		{http.MethodPost, "/v1/models"},
-		{http.MethodDelete, "/v1/models/x"},
+		// the catalogue reads are public, but only as reads
+		{http.MethodPost, "/v1/dnt/table"},
+		{http.MethodPost, "/v1/service/llm/v1/models"},
+		// everything else a service exposes still needs a key
+		{http.MethodPost, "/v1/service/llm/v1/chat/completions"},
+		{http.MethodGet, "/v1/service/llm/v1/chat/completions"},
+		{http.MethodGet, "/v1/service/flash-sandbox/v1/run"},
+		{http.MethodGet, "/v1/dnt/peers"},
 		{http.MethodPost, "/v1/chat/completions"},
-		{http.MethodGet, "/v1/chat/completions"},
-		{http.MethodGet, "/v1/embeddings"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)
@@ -169,10 +177,10 @@ func TestOnlyModelReadsArePublic(t *testing.T) {
 }
 
 // A public route still needs CORS headers so a browser can read the response.
-func TestPublicModelsCarriesCORS(t *testing.T) {
+func TestPublicCatalogueCarriesCORS(t *testing.T) {
 	h := New(stubValidator{valid: false}, proxyStub(), nil, []string{"https://app.example"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/dnt/table", nil)
 	req.Header.Set("Origin", "https://app.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
