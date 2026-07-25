@@ -186,3 +186,44 @@ func TestProxyUpstreamDownReturns502(t *testing.T) {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+// The upstream sets its own permissive CORS headers. If they survive alongside
+// this service's, the browser sees two Access-Control-Allow-Origin values and
+// rejects the response — so the proxy must strip the upstream's copies.
+func TestUpstreamCORSHeadersAreStripped(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "authorization, origin")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	// Simulate this service's CORS middleware having already set its policy.
+	rec.Header().Set("Access-Control-Allow-Origin", "https://app.example")
+	New(target).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	if got := rec.Header().Values("Access-Control-Allow-Origin"); len(got) != 1 || got[0] != "https://app.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %v, want exactly [https://app.example]", got)
+	}
+	for _, h := range []string{"Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Allow-Credentials"} {
+		if got := rec.Header().Values(h); len(got) != 0 {
+			t.Fatalf("%s = %v, want upstream copy stripped", h, got)
+		}
+	}
+	// The actual payload must still come through untouched.
+	if rec.Body.String() != `{"ok":true}` {
+		t.Fatalf("body = %q, want upstream body preserved", rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type = %q, want non-CORS headers preserved", ct)
+	}
+}
