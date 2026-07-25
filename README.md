@@ -124,7 +124,7 @@ Authorization: Bearer <neon-auth-jwt>
 | `NEON_AUTH_AUDIENCE`         | no       | —       | Expected JWT `aud` claim (enforced only if set)   |
 | `NEON_AUTH_JWKS_CACHE_TTL`   | no       | `1h`    | How long fetched JWKS keys are cached             |
 | `MAX_KEYS_PER_USER`          | no       | `10`    | Max active self-service keys per user             |
-| `CORS_ALLOWED_ORIGINS`       | no       | —       | Comma-separated origins allowed to call `/manage/keys` from a browser |
+| `CORS_ALLOWED_ORIGINS`       | no       | —       | Comma-separated origins allowed to call the API from a browser — both `/manage/keys*` and the `/v1/*` proxy |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.

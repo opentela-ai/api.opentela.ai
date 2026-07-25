@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/opentela-ai/api/internal/corsmw"
 	"github.com/opentela-ai/api/internal/keysvc"
 	"github.com/opentela-ai/api/internal/store"
 )
@@ -109,7 +110,7 @@ func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	return CORS(corsOrigins)(Middleware(v)(mux))
+	return corsmw.Middleware(corsOrigins)(Middleware(v)(mux))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

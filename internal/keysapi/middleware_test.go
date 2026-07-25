@@ -76,29 +76,3 @@ func TestMiddlewareEmptySubjectRejected(t *testing.T) {
 		t.Fatalf("code=%d, want 401 for empty subject", rec.Code)
 	}
 }
-
-func TestCORSPreflightAndEcho(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	h := CORS([]string{"https://app.example"})(next)
-
-	// Preflight is answered without hitting next and without auth.
-	pre := httptest.NewRequest(http.MethodOptions, "/manage/keys", nil)
-	pre.Header.Set("Origin", "https://app.example")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, pre)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("preflight code=%d, want 204", rec.Code)
-	}
-	if rec.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
-		t.Fatalf("missing ACAO on preflight: %q", rec.Header().Get("Access-Control-Allow-Origin"))
-	}
-
-	// Disallowed origin gets no ACAO header.
-	req := httptest.NewRequest(http.MethodGet, "/manage/keys", nil)
-	req.Header.Set("Origin", "https://evil.example")
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatal("ACAO set for disallowed origin")
-	}
-}

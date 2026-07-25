@@ -54,7 +54,7 @@ func run() error {
 		keyMgmt = keysapi.Router(svc, verifier, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/keys (issuer %s)", cfg.NeonAuthIssuer)
 	}
-	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt)
+	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt, cfg.CORSAllowedOrigins)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

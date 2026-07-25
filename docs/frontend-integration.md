@@ -52,14 +52,18 @@ The `/manage/keys` plane is already deployed and enabled, but three things must
 be configured for a browser frontend to use it. **Until these are done, browser
 calls will fail** (CORS error or `401`).
 
-1. **Allow the frontend origin (CORS).** Browser calls to `/manage/keys` are
-   cross-origin, so the frontend's exact origin must be allow-listed:
+1. **Allow the frontend origin (CORS).** Browser calls to `/manage/keys` **and**
+   to the proxied LLM endpoints (`/v1/*`, e.g. `GET /v1/models`,
+   `POST /v1/chat/completions`) are cross-origin, so the frontend's exact origin
+   must be allow-listed. A single `CORS_ALLOWED_ORIGINS` allowlist governs both
+   planes:
    ```bash
    flyctl secrets set CORS_ALLOWED_ORIGINS="https://app.opentela.ai" -a opentela-api
    # multiple origins: comma-separated, e.g. "https://app.opentela.ai,http://localhost:5173"
    ```
    Setting this triggers a redeploy. With it unset, the API sends no
    `Access-Control-Allow-Origin` header and the browser blocks the response.
+   Server-to-server callers (no `Origin` header) are unaffected either way.
 
 2. **Register the frontend domain with Neon Auth** (so login/redirects aren't
    rejected with `invalid domain`):
@@ -187,6 +191,11 @@ await fetch("https://api.opentela.ai/v1/chat/completions", {
 });
 ```
 
+From a browser, this `/v1/*` call is cross-origin, so the frontend origin must be
+in `CORS_ALLOWED_ORIGINS` (prereq #1) — the proxy plane is CORS-enabled with the
+same allowlist as `/manage/`, and the credential-less preflight `OPTIONS` is
+answered before auth.
+
 Note: revocation is not instant — a revoked key may keep working until its 14-day
 cache entry expires or the server restarts.
 
@@ -204,8 +213,11 @@ Base URL: `https://api.opentela.ai`. All `/manage/keys*` calls require
 | `DELETE` | `/manage/keys/{id}` | — | `204` | `401` `404` (not owner/unknown) `400` (bad id) |
 | `OPTIONS` | `/manage/keys` | — | `204` (CORS preflight) | — |
 
-CORS on the `/manage/` plane: allowed methods `GET, POST, DELETE, OPTIONS`;
+CORS applies to **both** planes — the `/manage/` management plane and the `/v1/*`
+proxy plane — with identical policy: allowed methods `GET, POST, DELETE, OPTIONS`;
 allowed headers `Authorization, Content-Type`; origins per `CORS_ALLOWED_ORIGINS`.
+A credential-less preflight `OPTIONS` on either plane is answered `204` before
+auth, so it never needs a token.
 
 ## Notes & gotchas
 

@@ -1,5 +1,6 @@
 // Package keysapi is the HTTP surface for user-owned key management: a JWT-gated
-// set of JSON endpoints under /manage/keys, plus their CORS handling.
+// set of JSON endpoints under /manage/keys. Cross-origin handling is applied by
+// the shared corsmw middleware, wired in Router.
 package keysapi
 
 import (
@@ -56,32 +57,4 @@ func bearerToken(header string) (string, bool) {
 	}
 	token := strings.TrimSpace(header[len(bearerPrefix):])
 	return token, token != ""
-}
-
-// CORS applies a minimal allowlist policy to the management plane. With an empty
-// list it is a pass-through (no CORS headers). Preflight OPTIONS is answered 204
-// before any downstream auth runs.
-func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
-	allowed := make(map[string]bool, len(allowedOrigins))
-	for _, o := range allowedOrigins {
-		if o = strings.TrimSpace(o); o != "" {
-			allowed[o] = true
-		}
-	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get("Origin")
-			if origin != "" && allowed[origin] {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			}
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
 }
