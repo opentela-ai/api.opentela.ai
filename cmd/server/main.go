@@ -12,6 +12,7 @@ import (
 
 	"github.com/opentela-ai/api/internal/auth"
 	"github.com/opentela-ai/api/internal/cache"
+	"github.com/opentela-ai/api/internal/catalog"
 	"github.com/opentela-ai/api/internal/config"
 	"github.com/opentela-ai/api/internal/keysapi"
 	"github.com/opentela-ai/api/internal/keysvc"
@@ -26,6 +27,10 @@ func main() {
 		log.Fatal(err)
 	}
 }
+
+// catalogCacheTTL bounds how stale the public catalogue can be, and how often a
+// flood of anonymous requests can reach the node.
+const catalogCacheTTL = 15 * time.Second
 
 func run() error {
 	cfg, err := config.Load()
@@ -54,7 +59,10 @@ func run() error {
 		keyMgmt = keysapi.Router(svc, verifier, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/keys (issuer %s)", cfg.NeonAuthIssuer)
 	}
-	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt, cfg.CORSAllowedOrigins)
+	// Public catalogue: distilled from the upstream node table, cached so a
+	// keyless endpoint cannot be used to hammer the node.
+	catalogHandler := catalog.New(cfg.UpstreamURL, catalogCacheTTL)
+	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt, catalogHandler, cfg.CORSAllowedOrigins)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

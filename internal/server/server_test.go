@@ -18,7 +18,7 @@ func proxyStub() http.Handler {
 }
 
 func TestHealthzOpen(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -28,7 +28,7 @@ func TestHealthzOpen(t *testing.T) {
 }
 
 func TestProxyRequiresAuth(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -38,7 +38,7 @@ func TestProxyRequiresAuth(t *testing.T) {
 }
 
 func TestProxyPassesWhenValid(t *testing.T) {
-	h := New(stubValidator{valid: true}, proxyStub(), nil, nil)
+	h := New(stubValidator{valid: true}, proxyStub(), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
 	req.Header.Set("Authorization", "Bearer good")
 	rec := httptest.NewRecorder()
@@ -52,7 +52,7 @@ func TestKeyMgmtRoutedWhenPresent(t *testing.T) {
 	keyMgmt := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot) // sentinel proving we reached the mgmt handler
 	})
-	h := New(stubValidator{valid: false}, proxyStub(), keyMgmt, nil)
+	h := New(stubValidator{valid: false}, proxyStub(), keyMgmt, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/keys", nil)
 	rec := httptest.NewRecorder()
@@ -64,7 +64,7 @@ func TestKeyMgmtRoutedWhenPresent(t *testing.T) {
 
 func TestManageNotRoutedWhenNil(t *testing.T) {
 	// With no mgmt handler, /manage/* falls through to the auth-gated proxy → 401.
-	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/manage/keys", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -78,7 +78,7 @@ func TestManageNotRoutedWhenNil(t *testing.T) {
 // WITHOUT requiring a Bearer key — i.e. it bypasses the API-key auth and never
 // reaches the proxy.
 func TestProxyPreflightBypassesAuth(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, []string{"https://app.example"})
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, []string{"https://app.example"})
 	req := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
 	req.Header.Set("Origin", "https://app.example")
 	rec := httptest.NewRecorder()
@@ -98,7 +98,7 @@ func TestProxyPreflightBypassesAuth(t *testing.T) {
 // A real (non-preflight) proxied request from an allowed origin gets the ACAO
 // header on the response so the browser can read it.
 func TestProxyCORSHeaderOnValidRequest(t *testing.T) {
-	h := New(stubValidator{valid: true}, proxyStub(), nil, []string{"https://app.example"})
+	h := New(stubValidator{valid: true}, proxyStub(), nil, nil, []string{"https://app.example"})
 	req := httptest.NewRequest(http.MethodGet, "/v1/dnt/table", nil)
 	req.Header.Set("Origin", "https://app.example")
 	req.Header.Set("Authorization", "Bearer good")
@@ -116,7 +116,7 @@ func TestProxyCORSHeaderOnValidRequest(t *testing.T) {
 // A proxied request from a NON-allowlisted origin still works for non-browser
 // callers but carries no ACAO header (a browser would then block reading it).
 func TestProxyNoCORSForDisallowedOrigin(t *testing.T) {
-	h := New(stubValidator{valid: true}, proxyStub(), nil, []string{"https://app.example"})
+	h := New(stubValidator{valid: true}, proxyStub(), nil, nil, []string{"https://app.example"})
 	req := httptest.NewRequest(http.MethodGet, "/v1/x", nil)
 	req.Header.Set("Origin", "https://evil.example")
 	req.Header.Set("Authorization", "Bearer good")
@@ -131,39 +131,34 @@ func TestProxyNoCORSForDisallowedOrigin(t *testing.T) {
 	}
 }
 
-// The catalogue is the permissionless surface: readable with no key.
-func TestCatalogueIsPublic(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+// /v1/services is the permissionless surface, served by the catalogue handler.
+func TestServicesCatalogueIsPublic(t *testing.T) {
+	catalogue := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot) // sentinel proving we reached the catalogue
+	})
+	h := New(stubValidator{valid: false}, proxyStub(), nil, catalogue, nil)
 
-	for _, path := range []string{
-		"/v1/dnt/table",
-		"/v1/service/llm/v1/models",
-		"/v1/service/flash-sandbox/v1/models",
-	} {
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK || rec.Body.String() != "proxied" {
-			t.Fatalf("GET %s: code=%d body=%q, want 200/proxied without a key",
-				path, rec.Code, rec.Body.String())
-		}
+	req := httptest.NewRequest(http.MethodGet, "/v1/services", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("code=%d, want 418 (catalogue reached without a key)", rec.Code)
 	}
 }
 
-// Opening the catalogue must not open anything that costs GPU time, and must
-// not turn /v1/models into a write endpoint.
-func TestOnlyModelReadsArePublic(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+// The raw node table and everything that spends GPU time stay behind the key.
+func TestOnlyTheCatalogueIsPublic(t *testing.T) {
+	catalogue := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	h := New(stubValidator{valid: false}, proxyStub(), nil, catalogue, nil)
 
 	cases := []struct{ method, path string }{
-		// the catalogue reads are public, but only as reads
-		{http.MethodPost, "/v1/dnt/table"},
-		{http.MethodPost, "/v1/service/llm/v1/models"},
-		// everything else a service exposes still needs a key
-		{http.MethodPost, "/v1/service/llm/v1/chat/completions"},
-		{http.MethodGet, "/v1/service/llm/v1/chat/completions"},
-		{http.MethodGet, "/v1/service/flash-sandbox/v1/run"},
+		{http.MethodGet, "/v1/dnt/table"},
 		{http.MethodGet, "/v1/dnt/peers"},
+		{http.MethodPost, "/v1/services"},
+		{http.MethodGet, "/v1/service/llm/v1/models"},
+		{http.MethodPost, "/v1/service/llm/v1/chat/completions"},
 		{http.MethodPost, "/v1/chat/completions"},
 	}
 	for _, c := range cases {
@@ -176,11 +171,24 @@ func TestOnlyModelReadsArePublic(t *testing.T) {
 	}
 }
 
+// With no catalogue wired, /v1/services must not become an open passthrough.
+func TestServicesGatedWhenCatalogueAbsent(t *testing.T) {
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d, want 401", rec.Code)
+	}
+}
+
 // A public route still needs CORS headers so a browser can read the response.
 func TestPublicCatalogueCarriesCORS(t *testing.T) {
-	h := New(stubValidator{valid: false}, proxyStub(), nil, []string{"https://app.example"})
+	catalogue := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := New(stubValidator{valid: false}, proxyStub(), nil, catalogue, []string{"https://app.example"})
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/dnt/table", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/services", nil)
 	req.Header.Set("Origin", "https://app.example")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
