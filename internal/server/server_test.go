@@ -130,3 +130,54 @@ func TestProxyNoCORSForDisallowedOrigin(t *testing.T) {
 		t.Fatalf("ACAO=%q set for disallowed origin, want empty", got)
 	}
 }
+
+// The model catalogue is the permissionless surface: readable with no key.
+func TestModelsListIsPublic(t *testing.T) {
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+
+	for _, path := range []string{"/v1/models", "/v1/models/Qwen%2FQwen3-8B"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != "proxied" {
+			t.Fatalf("GET %s: code=%d body=%q, want 200/proxied without a key",
+				path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// Opening the catalogue must not open anything that costs GPU time, and must
+// not turn /v1/models into a write endpoint.
+func TestOnlyModelReadsArePublic(t *testing.T) {
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil)
+
+	cases := []struct{ method, path string }{
+		{http.MethodPost, "/v1/models"},
+		{http.MethodDelete, "/v1/models/x"},
+		{http.MethodPost, "/v1/chat/completions"},
+		{http.MethodGet, "/v1/chat/completions"},
+		{http.MethodGet, "/v1/embeddings"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(c.method, c.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s: code=%d, want 401 (still key-gated)", c.method, c.path, rec.Code)
+		}
+	}
+}
+
+// A public route still needs CORS headers so a browser can read the response.
+func TestPublicModelsCarriesCORS(t *testing.T) {
+	h := New(stubValidator{valid: false}, proxyStub(), nil, []string{"https://app.example"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Origin", "https://app.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
+		t.Fatalf("ACAO=%q, want echoed origin", got)
+	}
+}
