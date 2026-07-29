@@ -21,7 +21,9 @@ const leeway = 60 * time.Second
 
 // Claims is the subset of verified JWT claims callers need.
 type Claims struct {
-	Subject string
+	Subject       string
+	Email         string
+	EmailVerified bool
 }
 
 // Verifier validates compact JWTs signed with EdDSA (Ed25519).
@@ -78,11 +80,13 @@ func (a *audienceClaim) UnmarshalJSON(b []byte) error {
 }
 
 type jwtClaims struct {
-	Iss string        `json:"iss"`
-	Sub string        `json:"sub"`
-	Aud audienceClaim `json:"aud"`
-	Exp int64         `json:"exp"`
-	Nbf int64         `json:"nbf"`
+	Iss           string        `json:"iss"`
+	Sub           string        `json:"sub"`
+	Email         string        `json:"email"`
+	EmailVerified bool          `json:"emailVerified"`
+	Aud           audienceClaim `json:"aud"`
+	Exp           int64         `json:"exp"`
+	Nbf           int64         `json:"nbf"`
 }
 
 // Verify checks the signature and claims of raw, returning its Claims on success.
@@ -127,7 +131,11 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 	if err := v.validateClaims(c); err != nil {
 		return Claims{}, err
 	}
-	return Claims{Subject: c.Sub}, nil
+	return Claims{
+		Subject:       c.Sub,
+		Email:         c.Email,
+		EmailVerified: c.EmailVerified,
+	}, nil
 }
 
 func (v *Verifier) validateClaims(c jwtClaims) error {

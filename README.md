@@ -15,6 +15,10 @@ configured upstream.
 | `CACHE_TTL`              | no       | `336h`  | TTL for validated keys (14 days)     |
 | `CACHE_NEGATIVE_TTL`     | no       | `30s`   | TTL for invalid results              |
 | `CACHE_JANITOR_INTERVAL` | no       | `1m`    | Expired-entry sweep interval         |
+| `INTERNAL_CONTROL_TOKEN` | no       | —       | Bearer secret for `/internal/acl/evaluate` (minimum 32 bytes) |
+| `IDENTITY_MAX_AGE`       | no       | `720h`  | Max age for email-domain ACL matches |
+| `OWNERSHIP_MAX_AGE`      | no       | `30s`   | Target freshness window for peer ownership checks |
+| `DECISION_CACHE_TTL`     | no       | `30s`   | Suggested TTL returned by the ACL evaluator |
 
 ## Run
 
@@ -41,7 +45,7 @@ go run ./cmd/keyctl list               # list keys (hash prefix, name, status)
 `keyctl`-created keys are plain admin keys with no owning user — they are
 separate from, and unaffected by, the per-user key management API below.
 
-## Key management API (optional)
+## Management and ACL API (optional)
 
 In addition to `keyctl`-managed admin keys, end users can mint their own API
 keys through a self-service HTTP plane, gated by a
@@ -53,10 +57,13 @@ This plane is enabled only when **both** `NEON_AUTH_JWKS_URL` and
 routed specially and falls through to the normal auth-gated proxy — the
 service behaves exactly like a pure proxy.
 
-When enabled, requests to `/manage/keys*` must carry
+When enabled, requests to `/manage/*` must carry
 `Authorization: Bearer <Neon Auth JWT>` (EdDSA-signed, verified against the
 project's JWKS; `iss`/`exp`/`nbf` and, if configured, `aud` are enforced).
-The JWT's `sub` claim scopes every operation to that user's own keys.
+The JWT's `sub` claim scopes every operation to that user's own keys. Each
+authenticated management request refreshes a server-side identity snapshot
+(`email`, verified flag, normalized domain, and verification time). Email-domain
+ACL rules fail closed when that snapshot becomes older than `IDENTITY_MAX_AGE`.
 
 ### Endpoints
 
@@ -115,6 +122,72 @@ Authorization: Bearer <neon-auth-jwt>
 204 No Content
 ```
 
+### Wallet endpoints
+
+- `GET /manage/wallets` lists the caller's verified linked wallets.
+- `POST /manage/wallets/challenges` accepts `{"wallet":"<base58>"}` and returns
+  `{id,message,expires_at}` for a single-use five-minute challenge.
+- `POST /manage/wallets` accepts `{"challenge_id":"...","signature":"<base58>"}`.
+  The signature must verify over the exact returned challenge message. Success
+  returns `201`. Replay/expired/already-linked wallets return `409`. Invalid
+  signatures return `422`.
+- `DELETE /manage/wallets/{id}` unlinks one of the caller's wallets. It returns
+  `409` while that wallet is still the ownership proof for one of the caller's
+  claimed instances.
+
+### Instance and ACL endpoints
+
+- `POST /manage/instances` accepts `{"peer_id":"...","label":"..."}`. The API
+  verifies that the peer is currently visible upstream, its identity attestation
+  is valid, and the attested wallet is already linked to the caller. Success
+  returns `201` and starts with `restricted` owner-only access.
+- `GET /manage/instances` lists only the caller's claimed peers, including
+  `peer_id`, `label`, `owner_wallet`, `mode`, `rules`, `ownership_status`,
+  `ownership_observed_at`, `policy_revision`, and `online`.
+- `PATCH /manage/instances/{id}` updates only `label` and `mode`.
+- `PUT /manage/instances/{id}/acl` atomically replaces the mode and entire rule
+  set with `{"mode":"public|restricted","rules":[...]}`.
+- `DELETE /manage/instances/{id}` deletes one of the caller's claims.
+
+Supported ACL rule kinds:
+
+- `email_domain`: lower-case ASCII DNS domain, exact match only after the final `@`.
+- `wallet`: canonical base58 Ed25519/Solana public key.
+
+Rules use OR semantics. Duplicate normalized rules are collapsed. An empty
+restricted ACL is owner-only.
+
+### Internal evaluator
+
+`POST /internal/acl/evaluate` is mounted ahead of the proxy catch-all and is
+never for browsers or public callers. It requires:
+
+```http
+Authorization: Bearer <INTERNAL_CONTROL_TOKEN>
+Content-Type: application/json
+```
+
+Request body:
+
+```json
+{"key_hash":"<lowercase sha256 hex>","peer_ids":["peer-a","peer-b"]}
+```
+
+Response body:
+
+```json
+{
+  "key_id": 17,
+  "allowed_peer_ids": ["peer-a"],
+  "denied": [{"peer_id":"peer-b","reason":"no_match"}],
+  "primary_wallet": "<base58-solana-pubkey>",
+  "cache_ttl_seconds": 30
+}
+```
+
+The raw API key is never sent to this endpoint. Invalid/revoked keys return
+`401`; malformed payloads return `400`; evaluation failures return `503`.
+
 ### Configuration (key management)
 
 | Variable                    | Required | Default | Purpose                                          |
@@ -125,6 +198,10 @@ Authorization: Bearer <neon-auth-jwt>
 | `NEON_AUTH_JWKS_CACHE_TTL`   | no       | `1h`    | How long fetched JWKS keys are cached             |
 | `MAX_KEYS_PER_USER`          | no       | `10`    | Max active self-service keys per user             |
 | `CORS_ALLOWED_ORIGINS`       | no       | —       | Comma-separated origins allowed to call the API from a browser — both `/manage/keys*` and the `/v1/*` proxy |
+| `INTERNAL_CONTROL_TOKEN`     | no       | —       | Shared bearer secret for `/internal/acl/evaluate` (minimum 32 bytes) |
+| `IDENTITY_MAX_AGE`           | no       | `720h`  | Freshness window for email-domain ACL matches     |
+| `OWNERSHIP_MAX_AGE`          | no       | `30s`   | Target max peer-ownership staleness window        |
+| `DECISION_CACHE_TTL`         | no       | `30s`   | Suggested downstream cache TTL for ACL decisions  |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.

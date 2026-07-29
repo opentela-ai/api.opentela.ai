@@ -73,11 +73,17 @@ func TestVerifyValid(t *testing.T) {
 	srv := jwksServer(t, pub)
 	defer srv.Close()
 	v := newVerifier(t, srv, "")
-	tok := signJWT(priv, map[string]any{"alg": "EdDSA", "kid": testKID, "typ": "JWT"}, validClaims())
+	claims := validClaims()
+	claims["email"] = "alice@example.com"
+	claims["emailVerified"] = true
+	tok := signJWT(priv, map[string]any{"alg": "EdDSA", "kid": testKID, "typ": "JWT"}, claims)
 
 	c, err := v.Verify(context.Background(), tok)
 	if err != nil || c.Subject != "user-alice" {
 		t.Fatalf("Verify = (%+v, %v), want subject user-alice, nil", c, err)
+	}
+	if c.Email != "alice@example.com" || !c.EmailVerified {
+		t.Fatalf("Verify claims = %+v, want email claims populated", c)
 	}
 }
 

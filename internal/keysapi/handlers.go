@@ -2,14 +2,15 @@ package keysapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/opentela-ai/api/internal/corsmw"
+	"github.com/opentela-ai/api/internal/httputil"
 	"github.com/opentela-ai/api/internal/keysvc"
+	"github.com/opentela-ai/api/internal/principal"
 	"github.com/opentela-ai/api/internal/store"
 )
 
@@ -47,15 +48,14 @@ type keyResponse struct {
 	RevokedAt *time.Time `json:"revoked_at"`
 }
 
-// Router builds the /manage/keys handler tree, wrapped with CORS (outermost) and
-// JWT auth. Preflight is handled by CORS before auth.
-func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
+// Routes builds the /manage/keys handler tree. Shared management middleware is
+// applied by the caller so keys, wallets, and instances all share one stack.
+func Routes(svc Service) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /manage/keys", func(w http.ResponseWriter, r *http.Request) {
 		userID, _ := UserID(r.Context())
 		var req createRequest
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-		if err := dec.Decode(&req); err != nil {
+		if err := httputil.DecodeStrict(w, r, maxBodyBytes, &req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -72,7 +72,7 @@ func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, http.StatusCreated, createResponse{
+		httputil.WriteJSON(w, http.StatusCreated, createResponse{
 			ID: info.ID, Key: token, Prefix: info.Prefix, Name: info.Name, CreatedAt: info.CreatedAt,
 		})
 	})
@@ -89,7 +89,7 @@ func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
 				ID: k.ID, Name: k.Name, Prefix: k.Prefix, CreatedAt: k.CreatedAt, RevokedAt: k.RevokedAt,
 			})
 		}
-		writeJSON(w, http.StatusOK, out)
+		httputil.WriteJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("DELETE /manage/keys/{id}", func(w http.ResponseWriter, r *http.Request) {
 		userID, _ := UserID(r.Context())
@@ -110,11 +110,11 @@ func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	return corsmw.Middleware(corsOrigins)(Middleware(v)(mux))
+	return mux
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// Router preserves the legacy standalone wiring used by existing tests and by
+// older single-surface setups.
+func Router(svc Service, v Verifier, corsOrigins []string) http.Handler {
+	return corsmw.Middleware(corsOrigins)(principal.Middleware(v, nil, nil)(Routes(svc)))
 }

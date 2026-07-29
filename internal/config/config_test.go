@@ -151,3 +151,26 @@ func TestLoadRejectsNonPositiveMaxKeys(t *testing.T) {
 		t.Fatal("Load() expected error for MAX_KEYS_PER_USER=0")
 	}
 }
+
+func TestLoadInternalACLRequiresHighEntropyToken(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("INTERNAL_CONTROL_TOKEN", "too-short")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for short INTERNAL_CONTROL_TOKEN")
+	}
+
+	t.Setenv("INTERNAL_CONTROL_TOKEN", " 01234567890123456789012345678901")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for token with surrounding whitespace")
+	}
+
+	t.Setenv("INTERNAL_CONTROL_TOKEN", "01234567890123456789012345678901")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() valid internal token: %v", err)
+	}
+	if !cfg.InternalACLEnabled || cfg.InternalControlToken == "" {
+		t.Fatalf("internal ACL config = enabled:%v token:%q", cfg.InternalACLEnabled, cfg.InternalControlToken)
+	}
+}

@@ -10,16 +10,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opentela-ai/api/internal/aclapi"
 	"github.com/opentela-ai/api/internal/auth"
 	"github.com/opentela-ai/api/internal/cache"
 	"github.com/opentela-ai/api/internal/catalog"
 	"github.com/opentela-ai/api/internal/config"
-	"github.com/opentela-ai/api/internal/keysapi"
+	"github.com/opentela-ai/api/internal/instancesapi"
 	"github.com/opentela-ai/api/internal/keysvc"
+	"github.com/opentela-ai/api/internal/manageapi"
+	"github.com/opentela-ai/api/internal/mesh"
 	"github.com/opentela-ai/api/internal/neonauth"
 	"github.com/opentela-ai/api/internal/proxy"
 	"github.com/opentela-ai/api/internal/server"
 	"github.com/opentela-ai/api/internal/store"
+	"github.com/opentela-ai/api/internal/walletsapi"
 )
 
 func main() {
@@ -53,16 +57,24 @@ func run() error {
 	validator := auth.NewValidator(pg, c, cfg.CacheTTL, cfg.CacheNegTTL)
 
 	var keyMgmt http.Handler
+	var internalACL http.Handler
 	if cfg.KeyMgmtEnabled {
 		verifier := neonauth.New(cfg.NeonAuthJWKSURL, cfg.NeonAuthIssuer, cfg.NeonAuthAudience, cfg.JWKSCacheTTL)
 		svc := keysvc.New(pg, cfg.MaxKeysPerUser)
-		keyMgmt = keysapi.Router(svc, verifier, cfg.CORSAllowedOrigins)
-		log.Printf("key management enabled at /manage/keys (issuer %s)", cfg.NeonAuthIssuer)
+		meshClient := mesh.New(cfg.UpstreamURL)
+		keyMgmt = manageapi.Router(svc, walletsapi.New(pg, cfg.IdentityMaxAge), instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), verifier, pg, cfg.CORSAllowedOrigins)
+		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
+		if cfg.InternalACLEnabled {
+			internalACL = aclapi.New(pg, meshClient, cfg.InternalControlToken, cfg.IdentityMaxAge, cfg.OwnershipMaxAge, cfg.DecisionCacheTTL).Handler()
+		}
+	} else if cfg.InternalACLEnabled {
+		meshClient := mesh.New(cfg.UpstreamURL)
+		internalACL = aclapi.New(pg, meshClient, cfg.InternalControlToken, cfg.IdentityMaxAge, cfg.OwnershipMaxAge, cfg.DecisionCacheTTL).Handler()
 	}
 	// Public catalogue: distilled from the upstream node table, cached so a
 	// keyless endpoint cannot be used to hammer the node.
 	catalogHandler := catalog.New(cfg.UpstreamURL, catalogCacheTTL)
-	handler := server.New(validator, proxy.New(cfg.UpstreamURL), keyMgmt, catalogHandler, cfg.CORSAllowedOrigins)
+	handler := server.NewWithInternal(validator, proxy.New(cfg.UpstreamURL), keyMgmt, internalACL, catalogHandler, cfg.CORSAllowedOrigins)
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,

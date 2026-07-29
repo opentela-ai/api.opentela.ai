@@ -33,6 +33,9 @@ func TestPreflightAnsweredWithoutHittingNext(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
 		t.Fatal("preflight missing Access-Control-Allow-Methods")
 	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, PUT, PATCH, DELETE, OPTIONS" {
+		t.Fatalf("preflight methods=%q, want PUT/PATCH support", got)
+	}
 }
 
 func TestAllowedOriginEchoedOnSimpleRequest(t *testing.T) {

@@ -2,8 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
+	"time"
 )
 
 // newTestStore connects to TEST_DATABASE_URL and applies the schema. It skips the
@@ -20,22 +24,29 @@ func newTestStore(t *testing.T) *Postgres {
 		t.Fatalf("NewPostgres: %v", err)
 	}
 	t.Cleanup(p.Close)
-	if err := p.Migrate(ctx, "DROP TABLE IF EXISTS api_keys;"); err != nil {
+	if err := p.Migrate(ctx, `
+		DROP TABLE IF EXISTS instance_acl_rules;
+		DROP TABLE IF EXISTS instances;
+		DROP TABLE IF EXISTS wallet_challenges;
+		DROP TABLE IF EXISTS user_wallets;
+		DROP TABLE IF EXISTS account_identities;
+		DROP TABLE IF EXISTS api_keys;
+	`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
-	ddl, err := os.ReadFile("../../migrations/0001_init.sql")
+	files, err := filepath.Glob("../../migrations/*.sql")
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("glob migrations: %v", err)
 	}
-	if err := p.Migrate(ctx, string(ddl)); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	ddl2, err := os.ReadFile("../../migrations/0002_user_keys.sql")
-	if err != nil {
-		t.Fatalf("read migration 0002: %v", err)
-	}
-	if err := p.Migrate(ctx, string(ddl2)); err != nil {
-		t.Fatalf("migrate 0002: %v", err)
+	sort.Strings(files)
+	for _, file := range files {
+		ddl, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", file, err)
+		}
+		if err := p.Migrate(ctx, string(ddl)); err != nil {
+			t.Fatalf("migrate %s: %v", file, err)
+		}
 	}
 	return p
 }
@@ -125,5 +136,164 @@ func TestPostgresUserKeyLifecycle(t *testing.T) {
 	// Revoked keys drop out of the active count.
 	if n, err := p.CountActiveByUser(ctx, alice); err != nil || n != 0 {
 		t.Fatalf("CountActiveByUser(after revoke) = (%d,%v), want (0,nil)", n, err)
+	}
+}
+
+func TestPostgresInstanceACLAndWalletLifecycle(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	const alice, bob = "user-alice", "user-bob"
+
+	alicePrimary, err := p.LinkWallet(ctx, alice, "wallet-alice-primary")
+	if err != nil || !alicePrimary.Primary {
+		t.Fatalf("LinkWallet(alice primary) = (%+v,%v), want primary", alicePrimary, err)
+	}
+	aliceBackup, err := p.LinkWallet(ctx, alice, "wallet-alice-backup")
+	if err != nil || aliceBackup.Primary {
+		t.Fatalf("LinkWallet(alice backup) = (%+v,%v), want non-primary", aliceBackup, err)
+	}
+	bobPrimary, err := p.LinkWallet(ctx, bob, "wallet-bob-primary")
+	if err != nil || !bobPrimary.Primary {
+		t.Fatalf("LinkWallet(bob primary) = (%+v,%v), want primary", bobPrimary, err)
+	}
+	if _, err := p.LinkWallet(ctx, alice, alicePrimary.Wallet); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate same-account wallet err=%v, want ErrConflict", err)
+	}
+	if _, err := p.LinkWallet(ctx, bob, alicePrimary.Wallet); !errors.Is(err, ErrWalletOtherAccount) {
+		t.Fatalf("cross-account wallet err=%v, want ErrWalletOtherAccount", err)
+	}
+
+	now := time.Now().UTC()
+	inst, err := p.CreateInstance(ctx, InstanceInfo{
+		AccountID:           alice,
+		PeerID:              "peer-lifecycle",
+		Label:               "Alice worker",
+		OwnerWallet:         alicePrimary.Wallet,
+		AccessMode:          "restricted",
+		OwnershipStatus:     "active",
+		ObservedWallet:      &alicePrimary.Wallet,
+		OwnershipObservedAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	if _, err := p.CreateInstance(ctx, InstanceInfo{
+		AccountID: alice, PeerID: "peer-wrong-wallet", OwnerWallet: bobPrimary.Wallet,
+		AccessMode: "restricted", OwnershipStatus: "active",
+	}); err == nil {
+		t.Fatal("CreateInstance accepted wallet owned by another account")
+	}
+
+	updated, err := p.ReplaceInstanceACL(ctx, alice, inst.ID, "restricted", "active", &alicePrimary.Wallet, &now, []ACLRule{
+		{Kind: "email_domain", Value: "example.com"},
+		{Kind: "wallet", Value: bobPrimary.Wallet},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceInstanceACL: %v", err)
+	}
+	if updated.PolicyRevision != inst.PolicyRevision+1 || len(updated.Rules) != 2 {
+		t.Fatalf("updated instance=%+v, want revision increment and two rules", updated)
+	}
+	managed, err := p.ListManagedInstancesByPeerIDs(ctx, []string{inst.PeerID})
+	if err != nil || len(managed) != 1 || len(managed[0].Rules) != 2 {
+		t.Fatalf("ListManagedInstancesByPeerIDs = (%+v,%v), want instance with rules", managed, err)
+	}
+	if _, err := p.DeleteWalletByIDForUser(ctx, alice, alicePrimary.ID); !errors.Is(err, ErrWalletInUse) {
+		t.Fatalf("DeleteWallet(active owner) err=%v, want ErrWalletInUse", err)
+	}
+
+	reclaimed, err := p.ReclaimInstance(ctx, inst.ID, bob, bobPrimary.Wallet, &bobPrimary.Wallet, &now)
+	if err != nil {
+		t.Fatalf("ReclaimInstance: %v", err)
+	}
+	if reclaimed.AccountID != bob || reclaimed.AccessMode != "restricted" || len(reclaimed.Rules) != 0 {
+		t.Fatalf("reclaimed=%+v, want Bob restricted owner-only", reclaimed)
+	}
+	got, err := p.GetInstanceByPeerID(ctx, inst.PeerID)
+	if err != nil || got.AccountID != bob || len(got.Rules) != 0 {
+		t.Fatalf("GetInstanceByPeerID after reclaim = (%+v,%v)", got, err)
+	}
+
+	changed, err := p.DeleteWalletByIDForUser(ctx, alice, alicePrimary.ID)
+	if err != nil || !changed {
+		t.Fatalf("DeleteWallet(released owner) = (%v,%v), want true,nil", changed, err)
+	}
+	aliceWallets, err := p.ListWalletsByUser(ctx, alice)
+	if err != nil || len(aliceWallets) != 1 || aliceWallets[0].ID != aliceBackup.ID || !aliceWallets[0].Primary {
+		t.Fatalf("Alice wallets after primary delete = (%+v,%v), want promoted backup", aliceWallets, err)
+	}
+}
+
+func TestPostgresWalletChallengeSingleUse(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	now := time.Now().UTC()
+	challenge := WalletChallenge{
+		ID: "challenge-race", AccountID: "user-alice", Wallet: "wallet-alice",
+		Nonce: "nonce", Message: "message", IssuedAt: now, ExpiresAt: now.Add(time.Minute),
+	}
+	if err := p.CreateWalletChallenge(ctx, challenge); err != nil {
+		t.Fatalf("CreateWalletChallenge: %v", err)
+	}
+
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() { results <- p.ConsumeWalletChallenge(ctx, challenge.AccountID, challenge.ID, now) }()
+	}
+	var successes, consumed int
+	for i := 0; i < 2; i++ {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrChallengeConsumed):
+			consumed++
+		default:
+			t.Fatalf("ConsumeWalletChallenge err=%v", err)
+		}
+	}
+	if successes != 1 || consumed != 1 {
+		t.Fatalf("challenge race successes=%d consumed=%d, want 1/1", successes, consumed)
+	}
+}
+
+func TestPostgresConcurrentInstanceClaim(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	aliceWallet, err := p.LinkWallet(ctx, "user-alice", "wallet-alice")
+	if err != nil {
+		t.Fatalf("LinkWallet(alice): %v", err)
+	}
+	bobWallet, err := p.LinkWallet(ctx, "user-bob", "wallet-bob")
+	if err != nil {
+		t.Fatalf("LinkWallet(bob): %v", err)
+	}
+	now := time.Now().UTC()
+	inputs := []InstanceInfo{
+		{AccountID: "user-alice", PeerID: "peer-race", OwnerWallet: aliceWallet.Wallet, AccessMode: "restricted", OwnershipStatus: "active", ObservedWallet: &aliceWallet.Wallet, OwnershipObservedAt: &now},
+		{AccountID: "user-bob", PeerID: "peer-race", OwnerWallet: bobWallet.Wallet, AccessMode: "restricted", OwnershipStatus: "active", ObservedWallet: &bobWallet.Wallet, OwnershipObservedAt: &now},
+	}
+	results := make(chan error, len(inputs))
+	for _, input := range inputs {
+		input := input
+		go func() {
+			_, err := p.CreateInstance(ctx, input)
+			results <- err
+		}()
+	}
+	var successes, conflicts int
+	for range inputs {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("CreateInstance race err=%v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("claim race successes=%d conflicts=%d, want 1/1", successes, conflicts)
 	}
 }

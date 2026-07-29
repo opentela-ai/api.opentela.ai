@@ -28,6 +28,12 @@ type Config struct {
 	MaxKeysPerUser     int
 	CORSAllowedOrigins []string
 	KeyMgmtEnabled     bool
+
+	InternalControlToken string
+	IdentityMaxAge       time.Duration
+	OwnershipMaxAge      time.Duration
+	DecisionCacheTTL     time.Duration
+	InternalACLEnabled   bool
 }
 
 // Load reads configuration from environment variables, applies defaults, and
@@ -72,6 +78,27 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	identityMaxAge, err := durationEnv("IDENTITY_MAX_AGE", 30*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	ownershipMaxAge, err := durationEnv("OWNERSHIP_MAX_AGE", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	decisionTTL, err := durationEnv("DECISION_CACHE_TTL", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	internalControlToken := os.Getenv("INTERNAL_CONTROL_TOKEN")
+	if internalControlToken != "" {
+		if strings.TrimSpace(internalControlToken) != internalControlToken {
+			return nil, fmt.Errorf("INTERNAL_CONTROL_TOKEN must not contain surrounding whitespace")
+		}
+		if len(internalControlToken) < 32 {
+			return nil, fmt.Errorf("INTERNAL_CONTROL_TOKEN must be at least 32 bytes")
+		}
+	}
 	jwksURL := os.Getenv("NEON_AUTH_JWKS_URL")
 	issuer := os.Getenv("NEON_AUTH_ISSUER")
 	if (jwksURL == "") != (issuer == "") {
@@ -94,13 +121,18 @@ func Load() (*Config, error) {
 		CacheNegTTL:  negTTL,
 		JanitorEvery: janitor,
 
-		NeonAuthJWKSURL:    jwksURL,
-		NeonAuthIssuer:     issuer,
-		NeonAuthAudience:   os.Getenv("NEON_AUTH_AUDIENCE"),
-		JWKSCacheTTL:       jwksTTL,
-		MaxKeysPerUser:     maxKeys,
-		CORSAllowedOrigins: corsOrigins,
-		KeyMgmtEnabled:     jwksURL != "" && issuer != "",
+		NeonAuthJWKSURL:      jwksURL,
+		NeonAuthIssuer:       issuer,
+		NeonAuthAudience:     os.Getenv("NEON_AUTH_AUDIENCE"),
+		JWKSCacheTTL:         jwksTTL,
+		MaxKeysPerUser:       maxKeys,
+		CORSAllowedOrigins:   corsOrigins,
+		KeyMgmtEnabled:       jwksURL != "" && issuer != "",
+		InternalControlToken: internalControlToken,
+		IdentityMaxAge:       identityMaxAge,
+		OwnershipMaxAge:      ownershipMaxAge,
+		DecisionCacheTTL:     decisionTTL,
+		InternalACLEnabled:   internalControlToken != "",
 	}, nil
 }
 

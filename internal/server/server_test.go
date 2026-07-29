@@ -62,6 +62,21 @@ func TestKeyMgmtRoutedWhenPresent(t *testing.T) {
 	}
 }
 
+func TestInternalACLRouteBeatsProxyCatchAll(t *testing.T) {
+	internal := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("internal"))
+	})
+	h := NewWithInternal(stubValidator{valid: false}, proxyStub(), nil, internal, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || rec.Body.String() != "internal" {
+		t.Fatalf("code=%d body=%q, want 201/internal", rec.Code, rec.Body.String())
+	}
+}
+
 func TestManageNotRoutedWhenNil(t *testing.T) {
 	// With no mgmt handler, /manage/* falls through to the auth-gated proxy → 401.
 	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)

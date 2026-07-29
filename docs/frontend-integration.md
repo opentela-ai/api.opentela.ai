@@ -1,4 +1,4 @@
-# Frontend Integration — Login & Minting API Keys
+# Frontend Integration — Login, Wallet Linking, and API Keys
 
 How a web frontend logs a user in and mints an opentela API key against
 `https://api.opentela.ai`.
@@ -150,7 +150,80 @@ const { key, id, prefix } = await createApiKey(jwt, "my-laptop");
 // Persist only `id` / `prefix` / `name` if you keep a local list.
 ```
 
-## Step 4 — List and revoke keys
+## Step 4 — Link verified wallets
+
+Wallets are linked through a server-issued challenge. The browser must sign the
+exact `message` returned by `/manage/wallets/challenges`; it must not invent a
+client-side challenge.
+
+```js
+async function createWalletChallenge(jwt, wallet) {
+  const res = await fetch(`${API_BASE}/manage/wallets/challenges`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ wallet }),
+  });
+  if (!res.ok) throw new Error(`Challenge failed: ${res.status}`);
+  return res.json(); // { id, message, expires_at }
+}
+
+async function linkWallet(jwt, challengeId, signature) {
+  const res = await fetch(`${API_BASE}/manage/wallets`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ challenge_id: challengeId, signature }),
+  });
+  if (res.status === 409) throw new Error("Challenge expired/replayed or wallet already linked");
+  if (res.status === 422) throw new Error("Wallet signature did not verify");
+  if (!res.ok) throw new Error(`Wallet link failed: ${res.status}`);
+  return res.json();
+}
+```
+
+## Step 5 — Claim instances and replace ACLs
+
+```js
+async function createInstance(jwt, peerId, label = "") {
+  const res = await fetch(`${API_BASE}/manage/instances`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ peer_id: peerId, label }),
+  });
+  if (res.status === 422) throw new Error("Peer is offline or ownership could not be verified");
+  if (res.status === 409) throw new Error("Peer is already claimed");
+  if (!res.ok) throw new Error(`Create instance failed: ${res.status}`);
+  return res.json();
+}
+
+async function replaceInstanceAcl(jwt, id, mode, rules) {
+  const res = await fetch(`${API_BASE}/manage/instances/${id}/acl`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ mode, rules }),
+  });
+  if (!res.ok) throw new Error(`ACL update failed: ${res.status}`);
+  return res.json();
+}
+```
+
+Rule values the UI should validate before submit:
+
+- `email_domain`: lower-case ASCII DNS domain with exact-match semantics.
+- `wallet`: canonical base58 Solana/Ed25519 public key.
+
+## Step 6 — List and revoke keys
 
 ```js
 async function listApiKeys(jwt) {
@@ -175,7 +248,7 @@ async function revokeApiKey(jwt, id) {
 A user can only see and revoke **their own** keys — the backend scopes every
 query to the JWT's user id, and another user's (or unknown) key id returns `404`.
 
-## Step 5 — Use the minted key
+## Step 7 — Use the minted key
 
 The `sk-…` key — **not** the JWT — authenticates real API calls, which the proxy
 validates (cached 14 days) and forwards to the opentela upstream:

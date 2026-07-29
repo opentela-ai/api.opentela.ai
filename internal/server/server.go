@@ -26,6 +26,10 @@ import (
 // cross-origin and their credential-less preflight OPTIONS bypasses auth.
 // corsOrigins is the same allowlist the management plane uses.
 func New(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, catalog http.Handler, corsOrigins []string) http.Handler {
+	return NewWithInternal(v, proxy, keyMgmt, nil, catalog, corsOrigins)
+}
+
+func NewWithInternal(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACL http.Handler, catalog http.Handler, corsOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -33,6 +37,9 @@ func New(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, catalo
 	})
 	if keyMgmt != nil {
 		mux.Handle("/manage/", keyMgmt)
+	}
+	if internalACL != nil {
+		mux.Handle("/internal/acl/evaluate", internalACL)
 	}
 
 	cors := corsmw.Middleware(corsOrigins)
