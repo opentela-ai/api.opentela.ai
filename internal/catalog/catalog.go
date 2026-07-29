@@ -10,11 +10,14 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/opentela-ai/api/internal/store"
 )
 
 // Service is one row of the public catalogue.
@@ -114,26 +117,45 @@ type Handler struct {
 	upstream *url.URL
 	client   *http.Client
 	ttl      time.Duration
+	policy   policyStore
 
 	mu      sync.Mutex
 	cached  []Service
 	fetched time.Time
 }
 
+type policyStore interface {
+	ListManagedInstancesByPeerIDs(ctx context.Context, peerIDs []string) ([]store.InstanceInfo, error)
+}
+
 // New returns a Handler reading the node table from upstream, serving each
 // result for up to ttl.
 func New(upstream *url.URL, ttl time.Duration) *Handler {
+	return NewWithPolicies(upstream, ttl, nil)
+}
+
+func NewWithPolicies(upstream *url.URL, ttl time.Duration, policy policyStore) *Handler {
 	return &Handler{
 		upstream: upstream,
 		client:   &http.Client{Timeout: 10 * time.Second},
 		ttl:      ttl,
+		policy:   policy,
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	services, err := h.services(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "catalogue unavailable"})
+		status := http.StatusBadGateway
+		var policyErr errPolicyUnavailable
+		if errors.As(err, &policyErr) {
+			// Once policy filtering is enabled, an unavailable policy store makes
+			// the permissionless/trusted classification indeterminate. Fail
+			// closed as a control-plane outage rather than presenting unfiltered
+			// mesh data as a public catalogue.
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, map[string]string{"error": "catalogue unavailable"})
 		return
 	}
 	writeJSON(w, http.StatusOK, Response{Services: services})
@@ -151,6 +173,12 @@ func (h *Handler) services(ctx context.Context) ([]Service, error) {
 	table, err := h.fetchTable(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if h.policy != nil {
+		table, err = h.filterTable(ctx, table)
+		if err != nil {
+			return nil, errPolicyUnavailable{err: err}
+		}
 	}
 	services := Summarise(table)
 
@@ -182,9 +210,66 @@ func (h *Handler) fetchTable(ctx context.Context) (map[string]Peer, error) {
 	return table, nil
 }
 
+func (h *Handler) filterTable(ctx context.Context, table map[string]Peer) (map[string]Peer, error) {
+	peerIDs := make([]string, 0, len(table))
+	for peerID := range table {
+		peerIDs = append(peerIDs, peerID)
+	}
+	managed, err := h.policy.ListManagedInstancesByPeerIDs(ctx, peerIDs)
+	if err != nil {
+		return nil, err
+	}
+	managedByPeer := make(map[string]store.InstanceInfo, len(managed))
+	for _, inst := range managed {
+		managedByPeer[inst.PeerID] = inst
+	}
+	filtered := make(map[string]Peer, len(table))
+	for peerID, peer := range table {
+		inst, ok := managedByPeer[peerID]
+		if !ok {
+			filtered[peerID] = peer
+			continue
+		}
+		switch inst.PolicyScope {
+		case store.PolicyScopeService:
+			allowed := make([]PeerService, 0, len(peer.Service))
+			for _, svc := range peer.Service {
+				if service, ok := findPermissionlessService(inst.Services, svc.Name); ok {
+					_ = service
+					allowed = append(allowed, svc)
+				}
+			}
+			peer.Service = allowed
+			filtered[peerID] = peer
+		default:
+			if inst.Membership == nil {
+				filtered[peerID] = peer
+				continue
+			}
+			peer.Service = nil
+			filtered[peerID] = peer
+		}
+	}
+	return filtered, nil
+}
+
+func findPermissionlessService(services []store.InstanceService, name string) (store.InstanceService, bool) {
+	for _, svc := range services {
+		if svc.ServiceName == name && svc.Exposure == store.ExposurePermissionless {
+			return svc, true
+		}
+	}
+	return store.InstanceService{}, false
+}
+
 type errUpstream struct{ status int }
 
 func (e errUpstream) Error() string { return http.StatusText(e.status) }
+
+type errPolicyUnavailable struct{ err error }
+
+func (e errPolicyUnavailable) Error() string { return e.err.Error() }
+func (e errPolicyUnavailable) Unwrap() error { return e.err }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

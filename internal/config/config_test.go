@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"testing"
 	"time"
 )
@@ -172,5 +174,29 @@ func TestLoadInternalACLRequiresHighEntropyToken(t *testing.T) {
 	}
 	if !cfg.InternalACLEnabled || cfg.InternalControlToken == "" {
 		t.Fatalf("internal ACL config = enabled:%v token:%q", cfg.InternalACLEnabled, cfg.InternalControlToken)
+	}
+}
+
+func TestLoadNodeCredentialSigningRequiresInternalToken(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("NODE_CREDENTIAL_SIGNING_KID", "kid-current")
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	t.Setenv("NODE_CREDENTIAL_SIGNING_KEY", base64.RawURLEncoding.EncodeToString(privateKey))
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error when node credential signing is enabled without INTERNAL_CONTROL_TOKEN")
+	}
+
+	t.Setenv("INTERNAL_CONTROL_TOKEN", "01234567890123456789012345678901")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with internal token: %v", err)
+	}
+	if !cfg.NodeCredentialEnabled {
+		t.Fatal("NodeCredentialEnabled should be true")
 	}
 }

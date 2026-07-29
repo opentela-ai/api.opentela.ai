@@ -2,12 +2,15 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/opentela-ai/api/internal/nodecred"
 )
 
 // Config holds all runtime configuration for the proxy service.
@@ -34,6 +37,12 @@ type Config struct {
 	OwnershipMaxAge      time.Duration
 	DecisionCacheTTL     time.Duration
 	InternalACLEnabled   bool
+
+	NodeCredentialIssuer     string
+	NodeCredentialSigningKID string
+	NodeCredentialSigningKey ed25519.PrivateKey
+	NodeCredentialVerifyKeys map[string]ed25519.PublicKey
+	NodeCredentialEnabled    bool
 }
 
 // Load reads configuration from environment variables, applies defaults, and
@@ -113,6 +122,43 @@ func Load() (*Config, error) {
 		}
 	}
 
+	nodeCredentialIssuer := stringEnv("NODE_CREDENTIAL_ISSUER", "api.opentela.ai")
+	nodeCredentialSigningKID := os.Getenv("NODE_CREDENTIAL_SIGNING_KID")
+	var nodeCredentialSigningKey ed25519.PrivateKey
+	nodeCredentialVerifyKeys := map[string]ed25519.PublicKey{}
+	if raw := os.Getenv("NODE_CREDENTIAL_SIGNING_KEY"); raw != "" {
+		key, err := nodecred.DecodeSigningKey(raw)
+		if err != nil {
+			return nil, fmt.Errorf("NODE_CREDENTIAL_SIGNING_KEY is invalid: %w", err)
+		}
+		nodeCredentialSigningKey = key
+		pub := key.Public().(ed25519.PublicKey)
+		if nodeCredentialSigningKID == "" {
+			return nil, fmt.Errorf("NODE_CREDENTIAL_SIGNING_KID is required when NODE_CREDENTIAL_SIGNING_KEY is set")
+		}
+		nodeCredentialVerifyKeys[nodeCredentialSigningKID] = pub
+	}
+	if raw := os.Getenv("NODE_CREDENTIAL_VERIFY_KEYS"); raw != "" {
+		for _, entry := range strings.Split(raw, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			kid, encoded, ok := strings.Cut(entry, ":")
+			if !ok || kid == "" || encoded == "" {
+				return nil, fmt.Errorf("NODE_CREDENTIAL_VERIFY_KEYS entry %q must be kid:base64", entry)
+			}
+			pub, err := nodecred.DecodePublicKey(encoded)
+			if err != nil {
+				return nil, fmt.Errorf("NODE_CREDENTIAL_VERIFY_KEYS entry %q is invalid: %w", entry, err)
+			}
+			nodeCredentialVerifyKeys[kid] = pub
+		}
+	}
+	if len(nodeCredentialSigningKey) == ed25519.PrivateKeySize && internalControlToken == "" {
+		return nil, fmt.Errorf("INTERNAL_CONTROL_TOKEN is required when NODE_CREDENTIAL_SIGNING_KEY is set")
+	}
+
 	return &Config{
 		UpstreamURL:  upstream,
 		DatabaseURL:  dbURL,
@@ -121,18 +167,23 @@ func Load() (*Config, error) {
 		CacheNegTTL:  negTTL,
 		JanitorEvery: janitor,
 
-		NeonAuthJWKSURL:      jwksURL,
-		NeonAuthIssuer:       issuer,
-		NeonAuthAudience:     os.Getenv("NEON_AUTH_AUDIENCE"),
-		JWKSCacheTTL:         jwksTTL,
-		MaxKeysPerUser:       maxKeys,
-		CORSAllowedOrigins:   corsOrigins,
-		KeyMgmtEnabled:       jwksURL != "" && issuer != "",
-		InternalControlToken: internalControlToken,
-		IdentityMaxAge:       identityMaxAge,
-		OwnershipMaxAge:      ownershipMaxAge,
-		DecisionCacheTTL:     decisionTTL,
-		InternalACLEnabled:   internalControlToken != "",
+		NeonAuthJWKSURL:          jwksURL,
+		NeonAuthIssuer:           issuer,
+		NeonAuthAudience:         os.Getenv("NEON_AUTH_AUDIENCE"),
+		JWKSCacheTTL:             jwksTTL,
+		MaxKeysPerUser:           maxKeys,
+		CORSAllowedOrigins:       corsOrigins,
+		KeyMgmtEnabled:           jwksURL != "" && issuer != "",
+		InternalControlToken:     internalControlToken,
+		IdentityMaxAge:           identityMaxAge,
+		OwnershipMaxAge:          ownershipMaxAge,
+		DecisionCacheTTL:         decisionTTL,
+		InternalACLEnabled:       internalControlToken != "",
+		NodeCredentialIssuer:     nodeCredentialIssuer,
+		NodeCredentialSigningKID: nodeCredentialSigningKID,
+		NodeCredentialSigningKey: nodeCredentialSigningKey,
+		NodeCredentialVerifyKeys: nodeCredentialVerifyKeys,
+		NodeCredentialEnabled:    len(nodeCredentialVerifyKeys) > 0 && len(nodeCredentialSigningKey) == ed25519.PrivateKeySize,
 	}, nil
 }
 

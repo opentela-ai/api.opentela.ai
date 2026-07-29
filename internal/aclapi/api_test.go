@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opentela-ai/api/internal/mesh"
+	"github.com/opentela-ai/api/internal/nodecred"
 	"github.com/opentela-ai/api/internal/store"
 )
 
@@ -60,6 +61,15 @@ type meshStub struct {
 	err          error
 	calls        int
 	requested    []string
+}
+
+type nodeVerifierStub struct {
+	claims nodecred.Claims
+	err    error
+}
+
+func (n nodeVerifierStub) Verify(context.Context, string) (nodecred.Claims, error) {
+	return n.claims, n.err
 }
 
 func (m *meshStub) LookupPeers(_ context.Context, peerIDs []string) (map[string]mesh.PeerObservation, error) {
@@ -291,6 +301,287 @@ func TestHandlerDedupesPeersAndLooksThemUpInOneBatch(t *testing.T) {
 	}
 	if got := strings.Join(resp.AllowedPeerIDs, ","); got != "peer-a,peer-b" {
 		t.Fatalf("allowed=%q, want peer-a,peer-b", got)
+	}
+}
+
+func TestEvaluateV1DeniesManagedServicePolicyPeerWithoutServiceContext(t *testing.T) {
+	store := &storeStub{
+		key:     store.ActiveKey{KeyID: 9},
+		managed: []store.InstanceInfo{{PeerID: "peer-a", PolicyScope: store.PolicyScopeService, OwnerWallet: "owner-wallet"}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC)},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluate(context.Background(), strings.Repeat("a", 64), []string{"peer-a"})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if len(resp.Denied) != 1 || resp.Denied[0].Reason != "service_context_required" {
+		t.Fatalf("denied=%v, want service_context_required", resp.Denied)
+	}
+}
+
+func TestEvaluateV2PermissionlessServiceAllowsDeclaredPublicBinding(t *testing.T) {
+	store := &storeStub{
+		key: store.ActiveKey{KeyID: 11},
+		managed: []store.InstanceInfo{{
+			PeerID:      "peer-a",
+			OwnerWallet: "owner-wallet",
+			PolicyScope: store.PolicyScopeService,
+			Services: []store.InstanceService{{
+				ServiceName:           "embeddings-public",
+				Exposure:              store.ExposurePermissionless,
+				AccessMode:            store.AccessModePublic,
+				ServicePolicyRevision: 3,
+			}},
+		}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {
+			PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC),
+			Services: []mesh.ServiceObservation{{Name: "embeddings-public"}},
+		},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash:   strings.Repeat("a", 64),
+		Partition: "permissionless",
+		RouteKind: "service_ingress",
+		Service:   "embeddings-public",
+		PeerIDs:   []string{"peer-a"},
+	}, nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if len(resp.Decisions) != 1 || !resp.Decisions[0].Allowed || resp.Decisions[0].ServiceExposure != "permissionless" {
+		t.Fatalf("decisions=%+v, want permissionless allow", resp.Decisions)
+	}
+}
+
+func TestEvaluateV2PermissionlessRouteRejectsTrustedBinding(t *testing.T) {
+	store := &storeStub{
+		key: store.ActiveKey{KeyID: 12},
+		managed: []store.InstanceInfo{{
+			PeerID:      "peer-a",
+			OwnerWallet: "owner-wallet",
+			PolicyScope: store.PolicyScopeService,
+			Membership:  &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 9},
+			Services: []store.InstanceService{{
+				ServiceName: "llm-private",
+				Exposure:    store.ExposureTrustedRegion,
+				AccessMode:  store.AccessModeRestricted,
+			}},
+		}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC), Services: []mesh.ServiceObservation{{Name: "llm-private"}}},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash:   strings.Repeat("a", 64),
+		Partition: "permissionless",
+		RouteKind: "service_ingress",
+		Service:   "llm-private",
+		PeerIDs:   []string{"peer-a"},
+	}, nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if got := resp.Decisions[0].Reason; got != "trusted_route_required" {
+		t.Fatalf("reason=%q, want trusted_route_required", got)
+	}
+}
+
+func TestEvaluateV2RejectsDuplicateLiveServiceName(t *testing.T) {
+	store := &storeStub{
+		key: store.ActiveKey{KeyID: 13},
+		managed: []store.InstanceInfo{{
+			PeerID:      "peer-a",
+			OwnerWallet: "owner-wallet",
+			PolicyScope: store.PolicyScopeService,
+			Services:    []store.InstanceService{{ServiceName: "dup", Exposure: store.ExposurePermissionless, AccessMode: store.AccessModePublic}},
+		}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC), Services: []mesh.ServiceObservation{{Name: "dup"}, {Name: "dup"}}},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash:   strings.Repeat("a", 64),
+		Partition: "permissionless",
+		RouteKind: "service_ingress",
+		Service:   "dup",
+		PeerIDs:   []string{"peer-a"},
+	}, nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if got := resp.Decisions[0].Reason; got != "duplicate_service_name" {
+		t.Fatalf("reason=%q, want duplicate_service_name", got)
+	}
+}
+
+func TestEvaluateV2TrustedWorkerRejectsUntrustedUpstream(t *testing.T) {
+	claims := nodecred.Claims{Subject: "peer-a", Role: "worker", Region: "research-eu", MembershipRevision: 4}
+	store := &storeStub{
+		key: store.ActiveKey{KeyID: 14},
+		managed: []store.InstanceInfo{
+			{
+				PeerID:      "peer-a",
+				OwnerWallet: "wallet-a",
+				PolicyScope: store.PolicyScopeService,
+				Membership:  &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+				Services:    []store.InstanceService{{ServiceName: "llm-private", Exposure: store.ExposureTrustedRegion, AccessMode: store.AccessModePublic}},
+			},
+			{
+				PeerID:      "peer-head",
+				OwnerWallet: "wallet-head",
+				PolicyScope: store.PolicyScopePeer,
+				Membership:  &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "suspended", NodeRole: "head", MembershipRevision: 8},
+			},
+		},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a":    {PeerID: "peer-a", Wallet: "wallet-a", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC), Services: []mesh.ServiceObservation{{Name: "llm-private"}}},
+		"peer-head": {PeerID: "peer-head", Wallet: "wallet-head", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC)},
+	}}
+	svc := NewWithNodeVerifier(store, mesh, "internal-secret-token", nodeVerifierStub{claims: claims}, time.Hour, time.Minute, 30*time.Second)
+	svc.now = func() time.Time { return time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC) }
+
+	resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash:        strings.Repeat("a", 64),
+		Partition:      "trusted_region",
+		Region:         "research-eu",
+		RouteKind:      "worker",
+		Service:        "llm-private",
+		PeerIDs:        []string{"peer-a"},
+		UpstreamPeerID: "peer-head",
+	}, &claims)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if got := resp.Decisions[0].Reason; got != "untrusted_upstream" {
+		t.Fatalf("reason=%q, want untrusted_upstream", got)
+	}
+}
+
+func TestEvaluateV2TrustedServiceFailsClosedForPartitionRoleAndRegion(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-time.Second)
+	claims := nodecred.Claims{Subject: "peer-head", Role: "head", Region: "research-eu", MembershipRevision: 8}
+	tests := []struct {
+		name       string
+		exposure   string
+		membership store.RegionMembership
+		wantReason string
+	}{
+		{
+			name:       "partition mismatch",
+			exposure:   store.ExposurePermissionless,
+			membership: store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+			wantReason: "partition_mismatch",
+		},
+		{
+			name:       "wrong target role",
+			exposure:   store.ExposureTrustedRegion,
+			membership: store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "head", MembershipRevision: 4},
+			wantReason: "wrong_role",
+		},
+		{
+			name:       "wrong target region",
+			exposure:   store.ExposureTrustedRegion,
+			membership: store.RegionMembership{RegionSlug: "research-us", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+			wantReason: "not_region_member",
+		},
+		{
+			name:       "disabled target region",
+			exposure:   store.ExposureTrustedRegion,
+			membership: store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "disabled", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+			wantReason: "membership_revoked",
+		},
+		{
+			name:       "expired active membership",
+			exposure:   store.ExposureTrustedRegion,
+			membership: store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4, ExpiresAt: &expiredAt},
+			wantReason: "membership_expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storeBackend := &storeStub{
+				key: store.ActiveKey{KeyID: 15},
+				managed: []store.InstanceInfo{
+					{
+						PeerID: "peer-target", OwnerWallet: "wallet-target", PolicyScope: store.PolicyScopeService,
+						Membership: &tt.membership,
+						Services:   []store.InstanceService{{ServiceName: "llm", Exposure: tt.exposure, AccessMode: store.AccessModePublic}},
+					},
+					{
+						PeerID: "peer-head", OwnerWallet: "wallet-head", PolicyScope: store.PolicyScopePeer,
+						Membership: &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "head", MembershipRevision: 8},
+					},
+				},
+			}
+			meshBackend := &meshStub{observations: map[string]mesh.PeerObservation{
+				"peer-target": {PeerID: "peer-target", Wallet: "wallet-target", ObservedAt: now.Add(-30 * time.Second), Services: []mesh.ServiceObservation{{Name: "llm"}}},
+				"peer-head":   {PeerID: "peer-head", Wallet: "wallet-head", ObservedAt: now.Add(-30 * time.Second)},
+			}}
+			svc := NewWithNodeVerifier(storeBackend, meshBackend, "internal-secret-token", nodeVerifierStub{claims: claims}, time.Hour, time.Minute, 30*time.Second)
+			svc.now = func() time.Time { return now }
+
+			resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+				KeyHash: strings.Repeat("a", 64), Partition: "trusted_region", Region: "research-eu",
+				RouteKind: "service_ingress", Service: "llm", PeerIDs: []string{"peer-target"},
+			}, &claims)
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("status=%d err=%v", status, err)
+			}
+			if len(resp.Decisions) != 1 || resp.Decisions[0].Allowed || resp.Decisions[0].Reason != tt.wantReason {
+				t.Fatalf("decisions=%+v, want denied %q", resp.Decisions, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestEvaluateV2TrustedServiceDeniesUnmanagedSameNameCandidate(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	claims := nodecred.Claims{Subject: "peer-head", Role: "head", Region: "research-eu", MembershipRevision: 8}
+	storeBackend := &storeStub{
+		key: store.ActiveKey{KeyID: 16},
+		managed: []store.InstanceInfo{
+			{
+				PeerID: "peer-managed", OwnerWallet: "wallet-managed", PolicyScope: store.PolicyScopeService,
+				Membership: &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+				Services:   []store.InstanceService{{ServiceName: "llm", Exposure: store.ExposureTrustedRegion, AccessMode: store.AccessModePublic}},
+			},
+			{
+				PeerID: "peer-head", OwnerWallet: "wallet-head", PolicyScope: store.PolicyScopePeer,
+				Membership: &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "head", MembershipRevision: 8},
+			},
+		},
+	}
+	meshBackend := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-managed": {PeerID: "peer-managed", Wallet: "wallet-managed", ObservedAt: now.Add(-30 * time.Second), Services: []mesh.ServiceObservation{{Name: "llm"}}},
+		"peer-head":    {PeerID: "peer-head", Wallet: "wallet-head", ObservedAt: now.Add(-30 * time.Second)},
+	}}
+	svc := NewWithNodeVerifier(storeBackend, meshBackend, "internal-secret-token", nodeVerifierStub{claims: claims}, time.Hour, time.Minute, 30*time.Second)
+	svc.now = func() time.Time { return now }
+
+	resp, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash: strings.Repeat("a", 64), Partition: "trusted_region", Region: "research-eu",
+		RouteKind: "service_ingress", Service: "llm", PeerIDs: []string{"peer-managed", "peer-attacker"},
+	}, &claims)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if len(resp.Decisions) != 2 || !resp.Decisions[0].Allowed || resp.Decisions[1].Allowed || resp.Decisions[1].Reason != "unmanaged" {
+		t.Fatalf("decisions=%+v", resp.Decisions)
 	}
 }
 

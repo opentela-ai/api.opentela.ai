@@ -15,10 +15,16 @@ configured upstream.
 | `CACHE_TTL`              | no       | `336h`  | TTL for validated keys (14 days)     |
 | `CACHE_NEGATIVE_TTL`     | no       | `30s`   | TTL for invalid results              |
 | `CACHE_JANITOR_INTERVAL` | no       | `1m`    | Expired-entry sweep interval         |
-| `INTERNAL_CONTROL_TOKEN` | no       | —       | Bearer secret for `/internal/acl/evaluate` (minimum 32 bytes) |
+| `INTERNAL_CONTROL_TOKEN` | no*      | —       | Bearer secret for internal ACL and node-credential endpoints (minimum 32 bytes) |
 | `IDENTITY_MAX_AGE`       | no       | `720h`  | Max age for email-domain ACL matches |
 | `OWNERSHIP_MAX_AGE`      | no       | `30s`   | Target freshness window for peer ownership checks |
 | `DECISION_CACHE_TTL`     | no       | `30s`   | Suggested TTL returned by the ACL evaluator |
+| `NODE_CREDENTIAL_ISSUER` | no       | `api.opentela.ai` | Issuer for trusted-node JWTs |
+| `NODE_CREDENTIAL_SIGNING_KID` | no* | —       | Active Ed25519 signing-key id |
+| `NODE_CREDENTIAL_SIGNING_KEY` | no* | —       | Base64 Ed25519 seed or private key; enables trusted-node credentials |
+| `NODE_CREDENTIAL_VERIFY_KEYS` | no | —       | Comma-separated `kid:base64-public-key` verification keys for rotation overlap |
+
+`INTERNAL_CONTROL_TOKEN` is required when `NODE_CREDENTIAL_SIGNING_KEY` is set.
 
 ## Run
 
@@ -147,6 +153,14 @@ Authorization: Bearer <neon-auth-jwt>
 - `PATCH /manage/instances/{id}` updates only `label` and `mode`.
 - `PUT /manage/instances/{id}/acl` atomically replaces the mode and entire rule
   set with `{"mode":"public|restricted","rules":[...]}`.
+- `GET /manage/instances/{id}/services` returns observed exact service names,
+  current `peer|service` policy scope, and the `service-policy-v2` capability.
+- `PUT /manage/instances/{id}/services` atomically replaces mixed-service
+  exposure. Each exact service is `permissionless`, `trusted_region`, or
+  `disabled`, with its own `inherit|public|restricted` ACL mode. Moving from
+  service scope back to peer scope requires `acknowledge_scope_reset: true` and
+  is rejected while trusted bindings remain.
+- `PUT /manage/instances/{id}/services/{service_id}/acl` replaces one service ACL.
 - `DELETE /manage/instances/{id}` deletes one of the caller's claims.
 
 Supported ACL rule kinds:
@@ -156,6 +170,23 @@ Supported ACL rule kinds:
 
 Rules use OR semantics. Duplicate normalized rules are collapsed. An empty
 restricted ACL is owner-only.
+
+### Trusted-region endpoints
+
+- `POST|GET /manage/regions` creates or lists regions owned by the caller. List
+  responses include current members and pending invitations.
+- `GET|PATCH|DELETE /manage/regions/{region_id}` reads, enables/disables, or
+  deletes an owned region.
+- `POST|GET /manage/regions/{region_id}/members` creates an expiring invitation
+  (or explicitly auto-accepts a caller-owned instance) and lists lifecycle state.
+- `PATCH /manage/regions/{region_id}/members/{instance_id}` accepts an invitation
+  or changes an owned region member's role/status. Reactivation requires a fresh
+  matching peer ownership observation.
+- `DELETE /manage/regions/{region_id}/members/{instance_id}` cancels a pending
+  invitation or releases membership. Release fails while trusted bindings exist.
+
+Region membership is API-authoritative. Advertising a region name, copying a
+service name, or joining the physical libp2p mesh does not grant trusted access.
 
 ### Internal evaluator
 
@@ -188,6 +219,19 @@ Response body:
 The raw API key is never sent to this endpoint. Invalid/revoked keys return
 `401`; malformed payloads return `400`; evaluation failures return `503`.
 
+Service-aware runtimes use `POST /internal/acl/evaluate-v2`. Permissionless
+calls authenticate with `INTERNAL_CONTROL_TOKEN`; trusted calls authenticate
+with a short-lived peer-key-bound node JWT. The request names the exact
+`partition`, `region`, `route_kind`, `service`, candidate peer ids, and (for a
+worker check) its authenticated libp2p upstream peer id. Trusted decisions are
+not cached by OpenTela and unmanaged peers are denied.
+
+Trusted nodes acquire that JWT through `POST /internal/node-credentials/challenges`
+and `POST /internal/node-credentials`. Both endpoints require
+`INTERNAL_CONTROL_TOKEN`; issuance additionally verifies a single-use challenge
+signed by the node's libp2p private key, active region membership, role,
+membership revision, and fresh ownership.
+
 ### Configuration (key management)
 
 | Variable                    | Required | Default | Purpose                                          |
@@ -198,13 +242,19 @@ The raw API key is never sent to this endpoint. Invalid/revoked keys return
 | `NEON_AUTH_JWKS_CACHE_TTL`   | no       | `1h`    | How long fetched JWKS keys are cached             |
 | `MAX_KEYS_PER_USER`          | no       | `10`    | Max active self-service keys per user             |
 | `CORS_ALLOWED_ORIGINS`       | no       | —       | Comma-separated origins allowed to call the API from a browser — both `/manage/keys*` and the `/v1/*` proxy |
-| `INTERNAL_CONTROL_TOKEN`     | no       | —       | Shared bearer secret for `/internal/acl/evaluate` (minimum 32 bytes) |
+| `INTERNAL_CONTROL_TOKEN`     | no*      | —       | Shared bearer secret for internal ACL and credential endpoints (minimum 32 bytes) |
 | `IDENTITY_MAX_AGE`           | no       | `720h`  | Freshness window for email-domain ACL matches     |
 | `OWNERSHIP_MAX_AGE`          | no       | `30s`   | Target max peer-ownership staleness window        |
 | `DECISION_CACHE_TTL`         | no       | `30s`   | Suggested downstream cache TTL for ACL decisions  |
+| `NODE_CREDENTIAL_ISSUER`     | no       | `api.opentela.ai` | Trusted-node JWT issuer                 |
+| `NODE_CREDENTIAL_SIGNING_KID` | no*     | —       | Active Ed25519 signing key id                     |
+| `NODE_CREDENTIAL_SIGNING_KEY` | no*     | —       | Base64 Ed25519 seed/private key                    |
+| `NODE_CREDENTIAL_VERIFY_KEYS` | no      | —       | Comma-separated verification keys for overlap     |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.
+`NODE_CREDENTIAL_SIGNING_KID` and `INTERNAL_CONTROL_TOKEN` are required when
+`NODE_CREDENTIAL_SIGNING_KEY` is configured.
 
 ## Test
 

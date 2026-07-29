@@ -25,6 +25,13 @@ func newTestStore(t *testing.T) *Postgres {
 	}
 	t.Cleanup(p.Close)
 	if err := p.Migrate(ctx, `
+		DROP TABLE IF EXISTS node_credential_challenges;
+		DROP TABLE IF EXISTS instance_service_acl_rules;
+		DROP TABLE IF EXISTS instance_services;
+		DROP TABLE IF EXISTS trusted_region_membership_events;
+		DROP TABLE IF EXISTS trusted_region_invitations;
+		DROP TABLE IF EXISTS trusted_region_memberships;
+		DROP TABLE IF EXISTS trusted_regions;
 		DROP TABLE IF EXISTS instance_acl_rules;
 		DROP TABLE IF EXISTS instances;
 		DROP TABLE IF EXISTS wallet_challenges;
@@ -295,5 +302,90 @@ func TestPostgresConcurrentInstanceClaim(t *testing.T) {
 	}
 	if successes != 1 || conflicts != 1 {
 		t.Fatalf("claim race successes=%d conflicts=%d, want 1/1", successes, conflicts)
+	}
+}
+
+func TestPostgresServicePolicyReleaseInvariant(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	const owner = "user-owner"
+
+	wallet, err := p.LinkWallet(ctx, owner, "wallet-owner")
+	if err != nil {
+		t.Fatalf("LinkWallet: %v", err)
+	}
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	inst, err := p.CreateInstance(ctx, InstanceInfo{
+		AccountID:           owner,
+		PeerID:              "peer-policy",
+		OwnerWallet:         wallet.Wallet,
+		AccessMode:          "restricted",
+		OwnershipStatus:     "active",
+		ObservedWallet:      &wallet.Wallet,
+		OwnershipObservedAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+	region, err := p.CreateRegion(ctx, RegionInfo{Slug: "research-eu", Name: "Research EU", OwnerAccountID: owner, Status: "active"})
+	if err != nil {
+		t.Fatalf("CreateRegion: %v", err)
+	}
+	invite, err := p.CreateRegionInvitation(ctx, owner, region.ID, inst.ID, "worker", "accept-token", now.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("CreateRegionInvitation: %v", err)
+	}
+	if _, err := p.AcceptRegionInvitation(ctx, owner, region.ID, inst.ID, "accept-token", now); err != nil {
+		t.Fatalf("AcceptRegionInvitation(%d): %v", invite.ID, err)
+	}
+
+	updated, err := p.ReplaceInstanceServicePolicy(ctx, owner, inst.ID, ReplaceServicePolicyInput{
+		PolicyScope: PolicyScopeService,
+		Inventory: ServiceInventory{
+			ObservedAt:       now,
+			SupportsPolicyV2: true,
+			Services:         []ObservedService{{Name: "llm-private", Count: 1}},
+		},
+		Services: []InstanceService{{
+			ServiceName: "llm-private",
+			Exposure:    ExposureTrustedRegion,
+			RegionID:    &region.ID,
+			AccessMode:  AccessModePublic,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceInstanceServicePolicy(service): %v", err)
+	}
+	if updated.PolicyScope != PolicyScopeService || len(updated.Services) != 1 {
+		t.Fatalf("updated=%+v", updated)
+	}
+	if changed, err := p.ReleaseMembership(ctx, owner, inst.ID); !errors.Is(err, ErrConflict) || changed {
+		t.Fatalf("ReleaseMembership with trusted binding = (%v,%v), want conflict", changed, err)
+	}
+	updated, err = p.ReplaceInstanceServicePolicy(ctx, owner, inst.ID, ReplaceServicePolicyInput{
+		PolicyScope:           PolicyScopePeer,
+		AcknowledgeScopeReset: true,
+	})
+	if err == nil {
+		t.Fatalf("ReplaceInstanceServicePolicy(peer) succeeded unexpectedly with trusted binding present: %+v", updated)
+	}
+	updated, err = p.ReplaceInstanceServicePolicy(ctx, owner, inst.ID, ReplaceServicePolicyInput{
+		PolicyScope: PolicyScopeService,
+		Inventory: ServiceInventory{
+			ObservedAt:       now,
+			SupportsPolicyV2: true,
+			Services:         []ObservedService{{Name: "llm-private", Count: 1}},
+		},
+		Services: []InstanceService{{
+			ServiceName: "llm-private",
+			Exposure:    ExposureDisabled,
+			AccessMode:  AccessModePublic,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceInstanceServicePolicy(disable): %v", err)
+	}
+	if changed, err := p.ReleaseMembership(ctx, owner, inst.ID); err != nil || !changed {
+		t.Fatalf("ReleaseMembership after disable = (%v,%v), want true,nil", changed, err)
 	}
 }

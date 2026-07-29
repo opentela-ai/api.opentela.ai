@@ -30,6 +30,10 @@ func New(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, catalo
 }
 
 func NewWithInternal(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACL http.Handler, catalog http.Handler, corsOrigins []string) http.Handler {
+	return NewWithControlPlanes(v, proxy, keyMgmt, internalACL, nil, nil, nil, catalog, corsOrigins)
+}
+
+func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, corsOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -38,8 +42,17 @@ func NewWithInternal(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Han
 	if keyMgmt != nil {
 		mux.Handle("/manage/", keyMgmt)
 	}
-	if internalACL != nil {
-		mux.Handle("/internal/acl/evaluate", internalACL)
+	if internalACLv1 != nil {
+		mux.Handle("/internal/acl/evaluate", internalACLv1)
+	}
+	if internalACLv2 != nil {
+		mux.Handle("/internal/acl/evaluate-v2", internalACLv2)
+	}
+	if nodeChallenge != nil {
+		mux.Handle("/internal/node-credentials/challenges", nodeChallenge)
+	}
+	if nodeIssue != nil {
+		mux.Handle("/internal/node-credentials", nodeIssue)
 	}
 
 	cors := corsmw.Middleware(corsOrigins)

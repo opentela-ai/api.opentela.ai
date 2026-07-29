@@ -1,13 +1,17 @@
 package catalog
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/opentela-ai/api/internal/store"
 )
 
 // Shaped like the live node table: one peer offering a catch-all sandbox, two
@@ -142,5 +146,68 @@ func TestHandlerReportsUpstreamFailure(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("code = %d, want 502", rec.Code)
+	}
+}
+
+type policyStoreStub struct {
+	managed []store.InstanceInfo
+	err     error
+}
+
+func (p policyStoreStub) ListManagedInstancesByPeerIDs(context.Context, []string) ([]store.InstanceInfo, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	return p.managed, nil
+}
+
+func TestHandlerFiltersManagedMixedPeerToPermissionlessBindingsOnly(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+		  "peer-managed": {"connected": true, "service": [{"name":"embeddings-public","identity_group":["all"]},{"name":"llm-private","identity_group":["model=Qwen"]}]},
+		  "peer-unmanaged": {"connected": true, "service": [{"name":"llm-private","identity_group":["model=Qwen"]}]}
+		}`))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{managed: []store.InstanceInfo{{
+		PeerID:      "peer-managed",
+		PolicyScope: store.PolicyScopeService,
+		Services: []store.InstanceService{
+			{ServiceName: "embeddings-public", Exposure: store.ExposurePermissionless},
+			{ServiceName: "llm-private", Exposure: store.ExposureTrustedRegion},
+		},
+	}}})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Services) != 2 {
+		t.Fatalf("services=%+v, want unmanaged llm-private and managed embeddings-public", body.Services)
+	}
+	if body.Services[0].Name != "embeddings-public" || body.Services[1].Name != "llm-private" {
+		t.Fatalf("services=%+v", body.Services)
+	}
+	if body.Services[1].Providers != 1 {
+		t.Fatalf("llm-private providers=%d, want only unmanaged provider", body.Services[1].Providers)
+	}
+}
+
+func TestHandlerFailsClosedWhenPolicyLookupFails(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(tableJSON))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	rec := httptest.NewRecorder()
+	NewWithPolicies(target, time.Minute, policyStoreStub{err: errors.New("db down")}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d, want 503", rec.Code)
 	}
 }

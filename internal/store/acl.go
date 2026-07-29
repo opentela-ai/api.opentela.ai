@@ -58,6 +58,7 @@ type InstanceInfo struct {
 	Label               string
 	OwnerWallet         string
 	AccessMode          string
+	PolicyScope         string
 	PolicyRevision      int64
 	OwnershipStatus     string
 	ObservedWallet      *string
@@ -65,6 +66,114 @@ type InstanceInfo struct {
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 	Rules               []ACLRule
+	Membership          *RegionMembership
+	Services            []InstanceService
+}
+
+type RegionInfo struct {
+	ID             int64
+	Slug           string
+	Name           string
+	OwnerAccountID string
+	Status         string
+	RegionRevision int64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type RegionMembership struct {
+	InstanceID          int64
+	PeerID              string
+	Label               string
+	RegionID            int64
+	RegionSlug          string
+	RegionStatus        string
+	RegionRevision      int64
+	NodeRole            string
+	Status              string
+	AdmittedByAccountID *string
+	AdmissionReason     *string
+	ExpiresAt           *time.Time
+	OwnershipVerifiedAt *time.Time
+	MembershipRevision  int64
+	TrustedServiceCount int
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type RegionInvitation struct {
+	ID                  int64
+	RegionID            int64
+	RegionSlug          string
+	InstanceID          int64
+	PeerID              string
+	Label               string
+	CreatedByAccountID  string
+	AcceptanceTokenHash string
+	Status              string
+	NodeRole            string
+	ExpiresAt           time.Time
+	AcceptedAt          *time.Time
+	CancelledAt         *time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type RegionMembershipEvent struct {
+	ID                 int64
+	InstanceID         int64
+	RegionID           *int64
+	EventKind          string
+	ActorAccountID     *string
+	MembershipRevision int64
+	Payload            []byte
+	CreatedAt          time.Time
+}
+
+type InstanceService struct {
+	ID                    int64
+	InstanceID            int64
+	ServiceName           string
+	Exposure              string
+	RegionID              *int64
+	RegionSlug            *string
+	AccessMode            string
+	ServicePolicyRevision int64
+	ObservedPresent       bool
+	ObservedLastSeenAt    *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	Rules                 []ACLRule
+}
+
+type ServiceInventory struct {
+	ObservedAt       time.Time
+	SupportsPolicyV2 bool
+	Services         []ObservedService
+}
+
+type ObservedService struct {
+	Name  string
+	Count int
+}
+
+type ReplaceServicePolicyInput struct {
+	PolicyScope           string
+	AcknowledgeScopeReset bool
+	Inventory             ServiceInventory
+	Services              []InstanceService
+}
+
+type NodeCredentialChallenge struct {
+	ID               string
+	PeerID           string
+	RegionSlug       string
+	NodeRole         string
+	NonceHash        string
+	ChallengeMessage string
+	IssuedAt         time.Time
+	ExpiresAt        time.Time
+	ConsumedAt       *time.Time
 }
 
 type ActiveKey struct {
@@ -331,11 +440,11 @@ func (p *Postgres) CreateInstance(ctx context.Context, in InstanceInfo) (Instanc
 	var out InstanceInfo
 	err := p.pool.QueryRow(ctx, `
 		INSERT INTO instances
-		    (account_id, peer_id, label, owner_wallet, access_mode, ownership_status, observed_wallet, ownership_observed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, policy_revision, created_at, updated_at`,
-		in.AccountID, in.PeerID, in.Label, in.OwnerWallet, in.AccessMode, in.OwnershipStatus, in.ObservedWallet, in.OwnershipObservedAt).
-		Scan(&out.ID, &out.PolicyRevision, &out.CreatedAt, &out.UpdatedAt)
+		    (account_id, peer_id, label, owner_wallet, access_mode, policy_scope, ownership_status, observed_wallet, ownership_observed_at)
+		VALUES ($1, $2, $3, $4, $5, COALESCE(NULLIF($6, ''), 'peer'), $7, $8, $9)
+		RETURNING id, policy_scope, policy_revision, created_at, updated_at`,
+		in.AccountID, in.PeerID, in.Label, in.OwnerWallet, in.AccessMode, in.PolicyScope, in.OwnershipStatus, in.ObservedWallet, in.OwnershipObservedAt).
+		Scan(&out.ID, &out.PolicyScope, &out.PolicyRevision, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return InstanceInfo{}, ErrConflict
@@ -347,6 +456,9 @@ func (p *Postgres) CreateInstance(ctx context.Context, in InstanceInfo) (Instanc
 	out.Label = in.Label
 	out.OwnerWallet = in.OwnerWallet
 	out.AccessMode = in.AccessMode
+	if out.PolicyScope == "" {
+		out.PolicyScope = PolicyScopePeer
+	}
 	out.OwnershipStatus = in.OwnershipStatus
 	out.ObservedWallet = in.ObservedWallet
 	out.OwnershipObservedAt = in.OwnershipObservedAt
@@ -355,9 +467,30 @@ func (p *Postgres) CreateInstance(ctx context.Context, in InstanceInfo) (Instanc
 
 func (p *Postgres) GetInstanceByIDForUser(ctx context.Context, accountID string, id int64) (InstanceInfo, error) {
 	out, err := p.getInstance(ctx, `SELECT id, account_id, peer_id, label, owner_wallet, access_mode,
-		policy_revision, ownership_status, observed_wallet, ownership_observed_at, created_at, updated_at
+		policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at, created_at, updated_at
 		FROM instances WHERE id = $1 AND account_id = $2`, id, accountID)
 	if err != nil {
+		return InstanceInfo{}, err
+	}
+	if err := p.enrichInstance(ctx, &out); err != nil {
+		return InstanceInfo{}, err
+	}
+	rules, err := p.ListInstanceRules(ctx, out.ID)
+	if err != nil {
+		return InstanceInfo{}, err
+	}
+	out.Rules = rules
+	return out, nil
+}
+
+func (p *Postgres) GetInstanceByID(ctx context.Context, id int64) (InstanceInfo, error) {
+	out, err := p.getInstance(ctx, `SELECT id, account_id, peer_id, label, owner_wallet, access_mode,
+		policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at, created_at, updated_at
+		FROM instances WHERE id = $1`, id)
+	if err != nil {
+		return InstanceInfo{}, err
+	}
+	if err := p.enrichInstance(ctx, &out); err != nil {
 		return InstanceInfo{}, err
 	}
 	rules, err := p.ListInstanceRules(ctx, out.ID)
@@ -370,9 +503,12 @@ func (p *Postgres) GetInstanceByIDForUser(ctx context.Context, accountID string,
 
 func (p *Postgres) GetInstanceByPeerID(ctx context.Context, peerID string) (InstanceInfo, error) {
 	out, err := p.getInstance(ctx, `SELECT id, account_id, peer_id, label, owner_wallet, access_mode,
-		policy_revision, ownership_status, observed_wallet, ownership_observed_at, created_at, updated_at
+		policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at, created_at, updated_at
 		FROM instances WHERE peer_id = $1`, peerID)
 	if err != nil {
+		return InstanceInfo{}, err
+	}
+	if err := p.enrichInstance(ctx, &out); err != nil {
 		return InstanceInfo{}, err
 	}
 	rules, err := p.ListInstanceRules(ctx, out.ID)
@@ -386,7 +522,7 @@ func (p *Postgres) GetInstanceByPeerID(ctx context.Context, peerID string) (Inst
 func (p *Postgres) ListInstancesByUser(ctx context.Context, accountID string) ([]InstanceInfo, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, account_id, peer_id, label, owner_wallet, access_mode,
-		       policy_revision, ownership_status, observed_wallet, ownership_observed_at,
+		       policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at,
 		       created_at, updated_at
 		FROM instances
 		WHERE account_id = $1
@@ -401,7 +537,7 @@ func (p *Postgres) ListInstancesByUser(ctx context.Context, accountID string) ([
 	for rows.Next() {
 		var item InstanceInfo
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.PeerID, &item.Label, &item.OwnerWallet, &item.AccessMode,
-			&item.PolicyRevision, &item.OwnershipStatus, &item.ObservedWallet, &item.OwnershipObservedAt,
+			&item.PolicyScope, &item.PolicyRevision, &item.OwnershipStatus, &item.ObservedWallet, &item.OwnershipObservedAt,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan instances: %w", err)
 		}
@@ -413,6 +549,9 @@ func (p *Postgres) ListInstancesByUser(ctx context.Context, accountID string) ([
 	}
 	if len(ids) == 0 {
 		return out, nil
+	}
+	if err := p.enrichInstances(ctx, out); err != nil {
+		return nil, err
 	}
 	rulesByID, err := p.listRulesByInstanceIDs(ctx, ids)
 	if err != nil {
@@ -436,11 +575,11 @@ func (p *Postgres) UpdateInstanceMetadata(ctx context.Context, accountID string,
 		    updated_at = now()
 		WHERE id = $1 AND account_id = $2
 		RETURNING id, account_id, peer_id, label, owner_wallet, access_mode,
-		          policy_revision, ownership_status, observed_wallet, ownership_observed_at,
+		          policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at,
 		          created_at, updated_at`,
 		id, accountID, label, mode, ownershipStatus, observedWallet, observedAt).
 		Scan(&out.ID, &out.AccountID, &out.PeerID, &out.Label, &out.OwnerWallet, &out.AccessMode,
-			&out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
+			&out.PolicyScope, &out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
 			&out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstanceInfo{}, ErrNotFound
@@ -450,6 +589,9 @@ func (p *Postgres) UpdateInstanceMetadata(ctx context.Context, accountID string,
 	}
 	out.Rules, err = p.ListInstanceRules(ctx, out.ID)
 	if err != nil {
+		return InstanceInfo{}, err
+	}
+	if err := p.enrichInstance(ctx, &out); err != nil {
 		return InstanceInfo{}, err
 	}
 	return out, nil
@@ -473,11 +615,11 @@ func (p *Postgres) ReplaceInstanceACL(ctx context.Context, accountID string, id 
 		    updated_at = now()
 		WHERE id = $1 AND account_id = $2
 		RETURNING id, account_id, peer_id, label, owner_wallet, access_mode,
-		          policy_revision, ownership_status, observed_wallet, ownership_observed_at,
+		          policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at,
 		          created_at, updated_at`,
 		id, accountID, mode, ownershipStatus, observedWallet, observedAt).
 		Scan(&out.ID, &out.AccountID, &out.PeerID, &out.Label, &out.OwnerWallet, &out.AccessMode,
-			&out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
+			&out.PolicyScope, &out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
 			&out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstanceInfo{}, ErrNotFound
@@ -511,6 +653,9 @@ func (p *Postgres) ReplaceInstanceACL(ctx context.Context, accountID string, id 
 		return InstanceInfo{}, fmt.Errorf("store: commit replace acl: %w", err)
 	}
 	out.Rules = slices.Clone(rules)
+	if err := p.enrichInstance(ctx, &out); err != nil {
+		return InstanceInfo{}, err
+	}
 	return out, nil
 }
 
@@ -531,6 +676,7 @@ func (p *Postgres) ReclaimInstance(ctx context.Context, id int64, accountID, own
 		SET account_id = $2,
 		    owner_wallet = $3,
 		    access_mode = 'restricted',
+		    policy_scope = 'peer',
 		    ownership_status = 'active',
 		    observed_wallet = $4,
 		    ownership_observed_at = $5,
@@ -538,11 +684,11 @@ func (p *Postgres) ReclaimInstance(ctx context.Context, id int64, accountID, own
 		    updated_at = now()
 		WHERE id = $1
 		RETURNING id, account_id, peer_id, label, owner_wallet, access_mode,
-		          policy_revision, ownership_status, observed_wallet, ownership_observed_at,
+		          policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at,
 		          created_at, updated_at`,
 		id, accountID, ownerWallet, observedWallet, observedAt).
 		Scan(&out.ID, &out.AccountID, &out.PeerID, &out.Label, &out.OwnerWallet, &out.AccessMode,
-			&out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
+			&out.PolicyScope, &out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
 			&out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstanceInfo{}, ErrNotFound
@@ -552,6 +698,9 @@ func (p *Postgres) ReclaimInstance(ctx context.Context, id int64, accountID, own
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return InstanceInfo{}, fmt.Errorf("store: commit reclaim: %w", err)
+	}
+	if err := p.enrichInstance(ctx, &out); err != nil {
+		return InstanceInfo{}, err
 	}
 	return out, nil
 }
@@ -607,7 +756,7 @@ func (p *Postgres) LookupActiveKey(ctx context.Context, keyHash string) (ActiveK
 func (p *Postgres) ListManagedInstancesByPeerIDs(ctx context.Context, peerIDs []string) ([]InstanceInfo, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT id, account_id, peer_id, label, owner_wallet, access_mode,
-		       policy_revision, ownership_status, observed_wallet, ownership_observed_at,
+		       policy_scope, policy_revision, ownership_status, observed_wallet, ownership_observed_at,
 		       created_at, updated_at
 		FROM instances WHERE peer_id = ANY($1)`, peerIDs)
 	if err != nil {
@@ -619,7 +768,7 @@ func (p *Postgres) ListManagedInstancesByPeerIDs(ctx context.Context, peerIDs []
 	for rows.Next() {
 		var item InstanceInfo
 		if err := rows.Scan(&item.ID, &item.AccountID, &item.PeerID, &item.Label, &item.OwnerWallet, &item.AccessMode,
-			&item.PolicyRevision, &item.OwnershipStatus, &item.ObservedWallet, &item.OwnershipObservedAt,
+			&item.PolicyScope, &item.PolicyRevision, &item.OwnershipStatus, &item.ObservedWallet, &item.OwnershipObservedAt,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan managed instance: %w", err)
 		}
@@ -628,6 +777,9 @@ func (p *Postgres) ListManagedInstancesByPeerIDs(ctx context.Context, peerIDs []
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: managed instances rows: %w", err)
+	}
+	if err := p.enrichInstances(ctx, out); err != nil {
+		return nil, err
 	}
 	rulesByID, err := p.listRulesByInstanceIDs(ctx, ids)
 	if err != nil {
@@ -643,7 +795,7 @@ func (p *Postgres) getInstance(ctx context.Context, query string, args ...any) (
 	var out InstanceInfo
 	err := p.pool.QueryRow(ctx, query, args...).
 		Scan(&out.ID, &out.AccountID, &out.PeerID, &out.Label, &out.OwnerWallet, &out.AccessMode,
-			&out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
+			&out.PolicyScope, &out.PolicyRevision, &out.OwnershipStatus, &out.ObservedWallet, &out.OwnershipObservedAt,
 			&out.CreatedAt, &out.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return InstanceInfo{}, ErrNotFound

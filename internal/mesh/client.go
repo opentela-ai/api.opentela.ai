@@ -28,16 +28,32 @@ type tableFetcher interface {
 }
 
 type PeerObservation struct {
-	PeerID     string
-	Wallet     string
-	ObservedAt time.Time
-	Online     bool
+	PeerID       string
+	Wallet       string
+	ObservedAt   time.Time
+	Online       bool
+	Services     []ServiceObservation
+	Capabilities map[string]struct{}
 }
 
 type peerRecord struct {
 	Connected           bool                        `json:"connected"`
 	Owner               string                      `json:"owner"`
 	IdentityAttestation *solana.IdentityAttestation `json:"identity_attestation"`
+	Service             []serviceRecord             `json:"service"`
+	Capabilities        []string                    `json:"capabilities"`
+	// RuntimeCapabilities accepts the field emitted by early service-policy-v2
+	// builds. New OpenTela versions use capabilities; accepting both keeps the
+	// management-plane upgrade gate safe during rollout.
+	RuntimeCapabilities []string `json:"runtime_capabilities"`
+}
+
+type serviceRecord struct {
+	Name string `json:"name"`
+}
+
+type ServiceObservation struct {
+	Name string
 }
 
 func New(upstream *url.URL) *Client {
@@ -94,8 +110,10 @@ func (c *Client) LookupPeers(ctx context.Context, peerIDs []string) (map[string]
 			// the age of the node's startup attestation. OpenTela signs its
 			// identity at startup, so using the signed timestamp here would make
 			// healthy long-running peers unverifiable after OWNERSHIP_MAX_AGE.
-			ObservedAt: c.now().UTC(),
-			Online:     true,
+			ObservedAt:   c.now().UTC(),
+			Online:       true,
+			Services:     observedServices(peer.Service),
+			Capabilities: capabilitySet(append(append([]string(nil), peer.Capabilities...), peer.RuntimeCapabilities...)),
 		}
 	}
 	return out, nil
@@ -111,6 +129,28 @@ func (c *Client) OnlineStatus(ctx context.Context, peerIDs []string) (map[string
 		out[id] = table[id].Connected
 	}
 	return out, nil
+}
+
+func observedServices(items []serviceRecord) []ServiceObservation {
+	out := make([]ServiceObservation, 0, len(items))
+	for _, item := range items {
+		if item.Name == "" {
+			continue
+		}
+		out = append(out, ServiceObservation{Name: item.Name})
+	}
+	return out
+}
+
+func capabilitySet(items []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item == "" {
+			continue
+		}
+		out[item] = struct{}{}
+	}
+	return out
 }
 
 func (c *Client) fetchTable(ctx context.Context) (map[string]peerRecord, error) {

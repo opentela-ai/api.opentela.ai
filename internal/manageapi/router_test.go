@@ -51,7 +51,7 @@ func (keyServiceStub) Revoke(context.Context, string, int64) (bool, error)   { r
 
 func TestRouterRefreshesIdentityForWalletRoutes(t *testing.T) {
 	store := &identityStoreStub{}
-	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, verifierStub{claims: neonauth.Claims{
+	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, verifierStub{claims: neonauth.Claims{
 		Subject:       "user-alice",
 		Email:         "alice@example.com",
 		EmailVerified: true,
@@ -77,7 +77,7 @@ func TestRouterRefreshesIdentityForWalletRoutes(t *testing.T) {
 }
 
 func TestRouterAnswersManagePreflightWithoutJWTVerification(t *testing.T) {
-	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, verifierStub{}, &identityStoreStub{}, []string{"https://app.example"})
+	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, verifierStub{}, &identityStoreStub{}, []string{"https://app.example"})
 
 	req := httptest.NewRequest(http.MethodOptions, "/manage/wallets", nil)
 	req.Header.Set("Origin", "https://app.example")
@@ -94,7 +94,7 @@ func TestRouterAnswersManagePreflightWithoutJWTVerification(t *testing.T) {
 
 func TestRouterMountsInstanceRoutesOnSharedStack(t *testing.T) {
 	store := &identityStoreStub{}
-	h := Router(keyServiceStub{}, nil, routeStub{status: http.StatusCreated}, verifierStub{claims: neonauth.Claims{
+	h := Router(keyServiceStub{}, nil, routeStub{status: http.StatusCreated}, nil, verifierStub{claims: neonauth.Claims{
 		Subject: "user-bob",
 	}}, store, nil)
 

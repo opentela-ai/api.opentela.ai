@@ -128,3 +128,28 @@ func TestLookupPeersFetchesTableOnceForBatch(t *testing.T) {
 		t.Fatalf("observations=%v, want verified observation time %v", obs, observedAt)
 	}
 }
+
+func TestLookupPeerAcceptsCurrentAndLegacyCapabilityFields(t *testing.T) {
+	walletA, attA := signedAttestation(t, "peer-a")
+	walletB, attB := signedAttestation(t, "peer-b")
+	client := newClient(t, map[string]peerRecord{
+		"peer-a": {
+			Connected: true, Owner: walletA, IdentityAttestation: attA,
+			Capabilities: []string{"service-policy-v2"},
+		},
+		"peer-b": {
+			Connected: true, Owner: walletB, IdentityAttestation: attB,
+			RuntimeCapabilities: []string{"service-policy-v2"},
+		},
+	})
+
+	observations, err := client.LookupPeers(t.Context(), []string{"peer-a", "peer-b"})
+	if err != nil {
+		t.Fatalf("LookupPeers: %v", err)
+	}
+	for _, peerID := range []string{"peer-a", "peer-b"} {
+		if _, ok := observations[peerID].Capabilities["service-policy-v2"]; !ok {
+			t.Fatalf("%s capabilities=%v, want service-policy-v2", peerID, observations[peerID].Capabilities)
+		}
+	}
+}

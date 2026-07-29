@@ -40,6 +40,7 @@ type instanceResponse struct {
 	Label               string            `json:"label"`
 	OwnerWallet         string            `json:"owner_wallet"`
 	Mode                string            `json:"mode"`
+	PolicyScope         string            `json:"policy_scope"`
 	PolicyRevision      int64             `json:"policy_revision"`
 	OwnershipStatus     string            `json:"ownership_status"`
 	OwnershipObservedAt *time.Time        `json:"ownership_observed_at,omitempty"`
@@ -79,6 +80,9 @@ type instanceStore interface {
 	ReplaceInstanceACL(ctx context.Context, accountID string, id int64, mode, ownershipStatus string, observedWallet *string, observedAt *time.Time, rules []store.ACLRule) (store.InstanceInfo, error)
 	DeleteInstanceByIDForUser(ctx context.Context, accountID string, id int64) (bool, error)
 	GetUserWalletSet(ctx context.Context, accountID string) ([]string, error)
+	GetInstanceServicesForUser(ctx context.Context, accountID string, instanceID int64) (store.InstanceInfo, error)
+	ReplaceInstanceServicePolicy(ctx context.Context, accountID string, instanceID int64, in store.ReplaceServicePolicyInput) (store.InstanceInfo, error)
+	ReplaceInstanceServiceACL(ctx context.Context, accountID string, instanceID, serviceID int64, accessMode string, rules []store.ACLRule) (store.InstanceService, error)
 }
 
 type instanceMesh interface {
@@ -102,6 +106,9 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /manage/instances", s.handleList)
 	mux.HandleFunc("PATCH /manage/instances/{id}", s.handlePatch)
 	mux.HandleFunc("PUT /manage/instances/{id}/acl", s.handleReplaceACL)
+	mux.HandleFunc("GET /manage/instances/{id}/services", s.handleListServices)
+	mux.HandleFunc("PUT /manage/instances/{id}/services", s.handleReplaceServices)
+	mux.HandleFunc("PUT /manage/instances/{id}/services/{service_id}/acl", s.handleReplaceServiceACL)
 	mux.HandleFunc("DELETE /manage/instances/{id}", s.handleDelete)
 	return mux
 }
@@ -467,6 +474,7 @@ func instanceToResponse(inst store.InstanceInfo, online bool) instanceResponse {
 		Label:               inst.Label,
 		OwnerWallet:         inst.OwnerWallet,
 		Mode:                inst.AccessMode,
+		PolicyScope:         inst.PolicyScope,
 		PolicyRevision:      inst.PolicyRevision,
 		OwnershipStatus:     inst.OwnershipStatus,
 		OwnershipObservedAt: inst.OwnershipObservedAt,

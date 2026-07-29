@@ -16,30 +16,34 @@ import (
 )
 
 type storeStub struct {
-	instanceByPeer    store.InstanceInfo
-	instanceByPeerErr error
-	createIn          store.InstanceInfo
-	createOut         store.InstanceInfo
-	createErr         error
-	reclaimOut        store.InstanceInfo
-	reclaimErr        error
-	instances         []store.InstanceInfo
-	instancesErr      error
-	identity          store.IdentityInfo
-	identityErr       error
-	instanceByID      store.InstanceInfo
-	instanceByIDErr   error
-	updateOut         store.InstanceInfo
-	updateErr         error
-	updateLabel       string
-	updateMode        string
-	replaceOut        store.InstanceInfo
-	replaceErr        error
-	deleteChanged     bool
-	deleteErr         error
-	wallets           []string
-	walletsErr        error
-	replacedRules     []store.ACLRule
+	instanceByPeer     store.InstanceInfo
+	instanceByPeerErr  error
+	createIn           store.InstanceInfo
+	createOut          store.InstanceInfo
+	createErr          error
+	reclaimOut         store.InstanceInfo
+	reclaimErr         error
+	instances          []store.InstanceInfo
+	instancesErr       error
+	identity           store.IdentityInfo
+	identityErr        error
+	instanceByID       store.InstanceInfo
+	instanceByIDErr    error
+	updateOut          store.InstanceInfo
+	updateErr          error
+	updateLabel        string
+	updateMode         string
+	replaceOut         store.InstanceInfo
+	replaceErr         error
+	deleteChanged      bool
+	deleteErr          error
+	wallets            []string
+	walletsErr         error
+	replacedRules      []store.ACLRule
+	serviceInstance    store.InstanceInfo
+	serviceInstanceErr error
+	serviceACL         store.InstanceService
+	serviceACLErr      error
 }
 
 func (s *storeStub) GetInstanceByPeerID(context.Context, string) (store.InstanceInfo, error) {
@@ -75,6 +79,15 @@ func (s *storeStub) DeleteInstanceByIDForUser(context.Context, string, int64) (b
 }
 func (s *storeStub) GetUserWalletSet(context.Context, string) ([]string, error) {
 	return s.wallets, s.walletsErr
+}
+func (s *storeStub) GetInstanceServicesForUser(context.Context, string, int64) (store.InstanceInfo, error) {
+	return s.serviceInstance, s.serviceInstanceErr
+}
+func (s *storeStub) ReplaceInstanceServicePolicy(context.Context, string, int64, store.ReplaceServicePolicyInput) (store.InstanceInfo, error) {
+	return s.serviceInstance, s.serviceInstanceErr
+}
+func (s *storeStub) ReplaceInstanceServiceACL(context.Context, string, int64, int64, string, []store.ACLRule) (store.InstanceService, error) {
+	return s.serviceACL, s.serviceACLErr
 }
 
 type meshStub struct {
