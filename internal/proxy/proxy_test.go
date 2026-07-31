@@ -227,3 +227,69 @@ func TestUpstreamCORSHeadersAreStripped(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want non-CORS headers preserved", ct)
 	}
 }
+
+// A Messages SSE stream whose text block carries leaked reasoning markers is
+// restructured into proper thinking/text blocks; everything else about the
+// proxy hop (incremental delivery included) is unchanged.
+func TestMessagesStreamWithLeakedMarkersIsTranslated(t *testing.T) {
+	leak := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<|open|>think<|sep|reasoning<|close|>think<|sep|answer"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, leak)
+	}))
+	defer upstream.Close()
+
+	target, _ := url.Parse(upstream.URL)
+	front := httptest.NewServer(New(target))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/service/llm/v1/messages", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if strings.Contains(string(body), "<|open|>") || strings.Contains(string(body), "<|close|>") {
+		t.Fatalf("marker bytes reached the client:\n%s", body)
+	}
+	for _, want := range []string{`\"type\":\"thinking\"`, "reasoning", "answer"} {
+		if !strings.Contains(string(body), strings.ReplaceAll(want, "\\\"", `"`)) {
+			t.Fatalf("translated stream missing %s:\n%s", want, body)
+		}
+	}
+}
+
+// A marker-free Messages SSE stream (the vLLM shape) is delivered untouched.
+func TestMessagesStreamWithoutMarkersIsUntouched(t *testing.T) {
+	clean := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, clean)
+	}))
+	defer upstream.Close()
+
+	target, _ := url.Parse(upstream.URL)
+	front := httptest.NewServer(New(target))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/messages", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != clean {
+		t.Fatalf("clean stream modified:\n--- in ---\n%s\n--- out ---\n%s", clean, body)
+	}
+}

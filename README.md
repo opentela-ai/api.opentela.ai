@@ -98,6 +98,39 @@ envelopes.
 Any other Anthropic SDK client works the same way: use the service-scoped
 gateway URL as the SDK base URL and the opentela key as the API key.
 
+### Reasoning-marker normalization (`internal/thinkfix`)
+
+Some backends serve the Anthropic API without a reasoning parser configured
+for the model's actual reasoning marker format. vLLM drives its reasoning
+state machine on token IDs, so markers can never appear in its output, but a
+text-matching parser that misses the model's real section tokens surfaces
+them in-band — the whole reply arrives as one text block containing
+`<|open|>think<|sep|…reasoning…<|close|>think<|sep|…answer…` (observed with
+Kimi-K3-style markers on SGLang). Instead of guessing which backend is
+behind a request, the gateway scans Anthropic Messages responses for the
+leaked-marker *effect* and translates it: the response is restructured into
+proper `thinking` and `text` content blocks,
+with dense downstream block indices and markers stripped, in both streaming
+(SSE) and non-streaming form.
+
+- **Inert when nothing leaks.** Marker-free responses pass through
+  byte-for-byte in streaming mode and unmodified in non-streaming mode, so
+  well-configured backends (vLLM, fixed SGLang) see zero behavior change; the
+  only cost is the scan.
+- **Scope.** Only successful `POST …/v1/messages` responses without
+  `Content-Encoding` are scanned (200 + `text/event-stream` SSE or
+  `application/json`). Tool-call argument deltas (`input_json_delta`) are
+  never scanned — a marker-shaped string inside tool JSON is data, not a
+  section header — and corrupted/garbage frames pass through verbatim rather
+  than being dropped.
+- **Truncation tails.** A marker fragment at the end of a truncated stream
+  (e.g. `<|close|>` cut at `max_tokens`) is dropped as truncation garbage.
+- **Text-level trade-off.** Translation keys on rendered text, not token IDs,
+  so a model that *deliberately* prints the literal marker strings would be
+  misclassified. Those strings are special-token renderings that do not occur
+  in legitimate output, so this is accepted; the fix still belongs on the
+  inference node (correct `--reasoning-parser`), this is a safety net.
+
 ## Management and ACL API (optional)
 
 In addition to `keyctl`-managed admin keys, end users can mint their own API

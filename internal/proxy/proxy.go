@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	"github.com/opentela-ai/api/internal/thinkfix"
 )
 
 // corsResponseHeaders are set by this service's own CORS middleware. The
@@ -26,6 +28,11 @@ var corsResponseHeaders = []string{
 // method, path, query, headers, and body. Responses stream back immediately
 // (FlushInterval -1), which matters for opentela's SSE/LLM output. Upstream
 // failures produce a 502.
+//
+// One deliberate exception to transparency: Anthropic Messages responses are
+// scanned for leaked reasoning-section markers and rewritten into proper
+// thinking blocks (internal/thinkfix). The rewrite is marker-triggered —
+// marker-free responses (e.g. vLLM backends) pass through byte-for-byte.
 func New(target *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		FlushInterval: -1,
@@ -37,7 +44,7 @@ func New(target *url.URL) *httputil.ReverseProxy {
 			for _, h := range corsResponseHeaders {
 				resp.Header.Del(h)
 			}
-			return nil
+			return thinkfix.MaybeWrapResponse(resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
