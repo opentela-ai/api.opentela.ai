@@ -33,7 +33,10 @@ func Middleware(allowedOrigins []string) func(http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				// X-Api-Key/Anthropic-Version/Anthropic-Beta let browser clients using
+				// the Anthropic Messages API (x-api-key auth, required version header)
+				// preflight like any other caller.
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Api-Key, Anthropic-Version, Anthropic-Beta")
 			}
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)

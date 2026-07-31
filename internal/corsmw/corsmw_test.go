@@ -3,6 +3,7 @@ package corsmw
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,14 @@ func TestPreflightAnsweredWithoutHittingNext(t *testing.T) {
 	}
 	if got := rec.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST, PUT, PATCH, DELETE, OPTIONS" {
 		t.Fatalf("preflight methods=%q, want PUT/PATCH support", got)
+	}
+	// Anthropic API clients (browser SDKs) authenticate with x-api-key and send
+	// required anthropic-* headers; preflight must allow them through.
+	allowedHeaders := rec.Header().Get("Access-Control-Allow-Headers")
+	for _, want := range []string{"Authorization", "Content-Type", "X-Api-Key", "Anthropic-Version", "Anthropic-Beta"} {
+		if !strings.Contains(allowedHeaders, want) {
+			t.Fatalf("preflight Access-Control-Allow-Headers=%q, want it to include %s", allowedHeaders, want)
+		}
 	}
 }
 

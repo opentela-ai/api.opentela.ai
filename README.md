@@ -1,7 +1,8 @@
 # opentela api proxy
 
 An authenticating reverse proxy in front of [opentela](https://opentela.ai/docs).
-Clients authenticate with `Authorization: Bearer <key>`; valid keys (stored in
+Clients authenticate with `Authorization: Bearer <key>` — or, for the Anthropic
+Messages API, with `x-api-key: <key>`; valid keys (stored in
 Postgres, cached in memory for 14 days) are forwarded transparently to the
 configured upstream.
 
@@ -50,6 +51,52 @@ go run ./cmd/keyctl list               # list keys (hash prefix, name, status)
 
 `keyctl`-created keys are plain admin keys with no owning user — they are
 separate from, and unaffected by, the per-user key management API below.
+
+## Using with Claude Code (Anthropic Messages API)
+
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) speaks the
+Anthropic Messages API. Mesh services that implement it — SGLang and vLLM both
+ship an Anthropic-compatible server (start the model with tool calling enabled,
+i.e. `--enable-auto-tool-choice` and the right `--tool-call-parser`; see the
+[vLLM Claude Code guide](https://docs.vllm.ai/en/stable/serving/integrations/claude_code/))
+— are reachable through the service-scoped route. This gateway forwards
+`POST /v1/service/<service>/v1/messages` (plus `/v1/messages/count_tokens` and
+streaming SSE) with all `anthropic-*` headers intact, and accepts your opentela
+API key in either credential header Claude Code sends: `Authorization: Bearer`
+(from `ANTHROPIC_AUTH_TOKEN`) or `x-api-key` (from `ANTHROPIC_API_KEY`).
+
+Launch Claude Code against the `llm` service (model names from
+`GET /v1/services`):
+
+```bash
+ANTHROPIC_BASE_URL=https://api.opentela.ai/v1/service/llm \
+ANTHROPIC_API_KEY=<your opentela key> \
+ANTHROPIC_AUTH_TOKEN=<your opentela key> \
+ANTHROPIC_DEFAULT_OPUS_MODEL=<model> \
+ANTHROPIC_DEFAULT_SONNET_MODEL=<model> \
+ANTHROPIC_DEFAULT_HAIKU_MODEL=<model> \
+claude
+```
+
+Verified live against `moonshotai/Kimi-K3` (SGLang): plain and streaming
+responses (full `message_start`…`message_stop` SSE sequence), `thinking`
+blocks, and forced `tool_use` all come back as spec-correct Anthropic
+envelopes.
+
+- `ANTHROPIC_AUTH_TOKEN` is required by Claude Code; set both auth variables to
+  the same opentela key.
+- The base URL must include the service prefix (`/v1/service/llm`) — the bare
+  `/v1/messages` root is not routed by the mesh. `GET .../v1/models` is not
+  routed on that prefix either; with the three default-model variables set,
+  Claude Code never needs it.
+- `<model>` must be a served-model alias — Claude Code cannot use model names
+  containing `/`.
+- If prefix caching suffers from Claude Code's per-request attribution hash,
+  set `"CLAUDE_CODE_ATTRIBUTION_HEADER": "0"` in `~/.claude/settings.json`
+  (handled server-side by vLLM > 0.17.1).
+
+Any other Anthropic SDK client works the same way: use the service-scoped
+gateway URL as the SDK base URL and the opentela key as the API key.
 
 ## Management and ACL API (optional)
 

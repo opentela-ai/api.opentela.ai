@@ -53,8 +53,9 @@ be configured for a browser frontend to use it. **Until these are done, browser
 calls will fail** (CORS error or `401`).
 
 1. **Allow the frontend origin (CORS).** Browser calls to `/manage/keys` **and**
-   to the proxied LLM endpoints (`/v1/*`, e.g. `GET /v1/models`,
-   `POST /v1/chat/completions`) are cross-origin, so the frontend's exact origin
+   to the proxied LLM endpoints (service-scoped paths under `/v1/*`, e.g.
+   `POST /v1/service/llm/v1/chat/completions` or, for the Anthropic API,
+   `POST /v1/service/llm/v1/messages`) are cross-origin, so the frontend's exact origin
    must be allow-listed. A single `CORS_ALLOWED_ORIGINS` allowlist governs both
    planes:
    ```bash
@@ -251,18 +252,24 @@ query to the JWT's user id, and another user's (or unknown) key id returns `404`
 ## Step 7 — Use the minted key
 
 The `sk-…` key — **not** the JWT — authenticates real API calls, which the proxy
-validates (cached 14 days) and forwards to the opentela upstream:
+validates (cached 14 days) and forwards to the opentela upstream. Generation
+paths are **service-scoped** — `/v1/service/<service>/v1/…`, with service names
+and model names from the public `GET /v1/services` catalogue:
 
 ```js
-await fetch("https://api.opentela.ai/v1/chat/completions", {
+await fetch("https://api.opentela.ai/v1/service/llm/v1/chat/completions", {
   method: "POST",
   headers: {
-    Authorization: `Bearer ${apiKey}`, // the sk-… key
+    Authorization: `Bearer ${apiKey}`, // the sk-… key (or `x-api-key: ${apiKey}`, Anthropic style)
     "Content-Type": "application/json",
   },
-  body: JSON.stringify({ /* … */ }),
+  body: JSON.stringify({ model: "<model from /v1/services>", messages: [/* … */] }),
 });
 ```
+
+The same service prefix serves the Anthropic Messages API
+(`POST /v1/service/llm/v1/messages`) for Anthropic SDK clients and Claude Code —
+see “Using with Claude Code (Anthropic Messages API)” in `README.md`.
 
 From a browser, this `/v1/*` call is cross-origin, so the frontend origin must be
 in `CORS_ALLOWED_ORIGINS` (prereq #1) — the proxy plane is CORS-enabled with the
@@ -287,8 +294,10 @@ Base URL: `https://api.opentela.ai`. All `/manage/keys*` calls require
 | `OPTIONS` | `/manage/keys` | — | `204` (CORS preflight) | — |
 
 CORS applies to **both** planes — the `/manage/` management plane and the `/v1/*`
-proxy plane — with identical policy: allowed methods `GET, POST, DELETE, OPTIONS`;
-allowed headers `Authorization, Content-Type`; origins per `CORS_ALLOWED_ORIGINS`.
+proxy plane — with identical policy: allowed methods
+`GET, POST, PUT, PATCH, DELETE, OPTIONS`; allowed headers
+`Authorization, Content-Type, X-Api-Key, Anthropic-Version, Anthropic-Beta`;
+origins per `CORS_ALLOWED_ORIGINS`.
 A credential-less preflight `OPTIONS` on either plane is answered `204` before
 auth, so it never needs a token.
 

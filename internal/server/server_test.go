@@ -48,6 +48,19 @@ func TestProxyPassesWhenValid(t *testing.T) {
 	}
 }
 
+// Claude Code / Anthropic SDK clients authenticate with x-api-key; the
+// Anthropic Messages API endpoint must reach the proxy with it.
+func TestProxyPassesWithXAPIKey(t *testing.T) {
+	h := New(stubValidator{valid: true}, proxyStub(), nil, nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("X-Api-Key", "good")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != "proxied" {
+		t.Fatalf("code=%d body=%q, want 200/proxied", rec.Code, rec.Body.String())
+	}
+}
+
 func TestKeyMgmtRoutedWhenPresent(t *testing.T) {
 	keyMgmt := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTeapot) // sentinel proving we reached the mgmt handler
@@ -175,6 +188,8 @@ func TestOnlyTheCatalogueIsPublic(t *testing.T) {
 		{http.MethodGet, "/v1/service/llm/v1/models"},
 		{http.MethodPost, "/v1/service/llm/v1/chat/completions"},
 		{http.MethodPost, "/v1/chat/completions"},
+		{http.MethodPost, "/v1/messages"},
+		{http.MethodPost, "/v1/messages/count_tokens"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)
