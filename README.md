@@ -105,18 +105,23 @@ for the model's actual reasoning marker format. vLLM drives its reasoning
 state machine on token IDs, so markers can never appear in its output, but a
 text-matching parser that misses the model's real section tokens surfaces
 them in-band — the whole reply arrives as one text block containing
-`<|open|>think<|sep|…reasoning…<|close|>think<|sep|…answer…` (observed with
-Kimi-K3-style markers on SGLang). Instead of guessing which backend is
-behind a request, the gateway scans Anthropic Messages responses for the
-leaked-marker *effect* and translates it: the response is restructured into
-proper `thinking` and `text` content blocks,
+`<|open|>think<|sep|<|sep|>…reasoning…<|close|>think<|sep|…answer…`
+(observed with Kimi-K3-style markers on SGLang; the separator renders in two
+forms, `<|sep|` and `<|sep|>`, and often appears doubled). Instead of
+guessing which backend is behind a request, the gateway scans Anthropic
+Messages responses for the leaked-marker *effect* and translates it: the
+response is restructured into proper `thinking` and `text` content blocks,
 with dense downstream block indices and markers stripped, in both streaming
-(SSE) and non-streaming form.
+(SSE) and non-streaming form. Separator tokens (`<|sep|`/`<|sep|>`) are
+stripped at the start of every section — after a translated marker, at an
+upstream block boundary, and even in marker-free responses, which cleans up
+the lone `<|sep|>` remnant left by backends that half-apply the thinking/text
+split themselves.
 
-- **Inert when nothing leaks.** Marker-free responses pass through
-  byte-for-byte in streaming mode and unmodified in non-streaming mode, so
-  well-configured backends (vLLM, fixed SGLang) see zero behavior change; the
-  only cost is the scan.
+- **Inert when nothing leaks.** Marker- and separator-free responses pass
+  through byte-for-byte in streaming mode and unmodified in non-streaming
+  mode, so well-configured backends (vLLM, fixed SGLang) see zero behavior
+  change; the only cost is the scan.
 - **Scope.** Only successful `POST …/v1/messages` responses without
   `Content-Encoding` are scanned (200 + `text/event-stream` SSE or
   `application/json`). Tool-call argument deltas (`input_json_delta`) are

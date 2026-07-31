@@ -54,6 +54,54 @@ func TestJSONLeakTranslated(t *testing.T) {
 	}
 }
 
+// The double-separator leak as observed live: "<|open|>think" + bare + full
+// separator before the reasoning text.
+func TestJSONDoubleSeparatorTranslated(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"<|open|>think<|sep|<|sep|>Check a couple more.\n<|close|>think<|sep|<|sep|>Here's the summary."}]}`
+	out, changed, err := RewriteAnthropicMessage([]byte(body))
+	if !changed || err != nil {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatal(err)
+	}
+	content := msg["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("want 2 blocks, got %s", out)
+	}
+	b0 := content[0].(map[string]any)
+	b1 := content[1].(map[string]any)
+	if b0["type"] != "thinking" || b0["thinking"] != "Check a couple more.\n" {
+		t.Fatalf("thinking block: %#v", b0)
+	}
+	if b1["type"] != "text" || b1["text"] != "Here's the summary." {
+		t.Fatalf("text block: %#v", b1)
+	}
+}
+
+// A lone separator at the start of a block emitted by a half-splitting
+// backend: stripped even without any section markers, so changed=true.
+func TestJSONBareSeparatorStripped(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"thinking","thinking":"counting files"},{"type":"text","text":"<|sep|>Here's a summary."}]}`
+	out, changed, err := RewriteAnthropicMessage([]byte(body))
+	if !changed || err != nil {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	var msg map[string]any
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatal(err)
+	}
+	content := msg["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("want 2 blocks, got %s", out)
+	}
+	b1 := content[1].(map[string]any)
+	if b1["type"] != "text" || b1["text"] != "Here's a summary." {
+		t.Fatalf("text block: %#v", b1)
+	}
+}
+
 func TestJSONNonMessageBody(t *testing.T) {
 	for _, body := range []string{
 		`{"error":{"type":"not_found_error","message":"nope"}}`,

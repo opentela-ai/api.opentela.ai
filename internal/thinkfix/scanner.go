@@ -5,11 +5,24 @@
 // match the served model) decode the model's reasoning-section special tokens
 // into visible text, e.g. Kimi-K3 emitting
 //
-//	<|open|>think<|sep|<reasoning><|close|>think<|sep|<answer>
+//	<|open|>think<|sep|<|sep|><reasoning><|close|>think<|sep|<|sep|><answer>
 //
 // inside ordinary text deltas. Clients then display the raw markers. This
 // package re-classifies such text into thinking/text segments so the proxy can
 // emit proper Anthropic thinking blocks instead.
+//
+// Two token shapes are handled at two levels:
+//
+//   - Section markers <|open|>think and <|close|>think switch the attribution
+//     of what follows (text vs thinking). The trailing separator is NOT part
+//     of the marker: model output has been observed both with and without it
+//     (compaction-style turns emit "<|close|>think the answer" directly).
+//   - The separator token, rendered by the model in two forms — bare
+//     "<|sep|" (no closing bracket) and full "<|sep|>" — which regularly
+//     appears doubled after a section marker and occasionally alone at the
+//     start of a block emitted by a half-working backend split. It is stripped
+//     wherever it opens a section, but left untouched mid-content, where it
+//     could — in principle — be literal model text.
 //
 // The translation is marker-triggered and inert by design: a response that
 // contains no markers (vLLM with its token-ID reasoning parser, or a correctly
@@ -26,10 +39,15 @@ package thinkfix
 
 import "strings"
 
-// Marker strings, exactly as rendered by the misconfigured backend.
+// Marker strings, exactly as rendered by the misconfigured backend. The
+// separator is handled separately from the markers and in both observed
+// renderings: leaks around markers appear with the separator absent,
+// bare ("<|sep|"), full ("<|sep|>"), or doubled in mixed form.
 const (
-	thinkOpenMarker  = "<|open|>think<|sep|"
-	thinkCloseMarker = "<|close|>think<|sep|"
+	thinkOpenMarker  = "<|open|>think"
+	thinkCloseMarker = "<|close|>think"
+	sepBareToken     = "<|sep|"
+	sepFullToken     = "<|sep|>"
 )
 
 // Segment is a piece of response text attributed to either the thinking
@@ -42,10 +60,15 @@ type Segment struct {
 // Scanner incrementally classifies a text stream into thinking/text segments.
 // It holds back at most len(marker)-1 bytes — a suffix that might be the start
 // of a marker split across Feed calls — so latency impact is negligible.
+// Additionally, at the start of every section (stream start, upstream block
+// boundary, or just after a consumed marker) it strips any number of leading
+// separator tokens, holding back bytes while a partial separator could still
+// complete in a later chunk.
 type Scanner struct {
 	inThink bool
 	pending string
 	flipped bool // a marker has been consumed at least once
+	atStart bool // at a section start: strip leading separator tokens
 }
 
 func NewScanner() *Scanner { return &Scanner{} }
@@ -58,10 +81,12 @@ func (s *Scanner) Flipped() bool { return s.flipped }
 // Seed resets the scanner's expectation to match a new content block: upstream
 // block boundaries redefine the context, so any marker fragment straddling the
 // boundary is discarded and the next marker to match is open (text block) or
-// close (thinking block).
+// close (thinking block). The new block's first bytes go through separator
+// stripping, mirroring what happens after a consumed marker.
 func (s *Scanner) Seed(inThink bool) {
 	s.inThink = inThink
 	s.pending = ""
+	s.atStart = true
 }
 
 func (s *Scanner) marker() string {
@@ -72,12 +97,26 @@ func (s *Scanner) marker() string {
 }
 
 // Feed consumes a chunk of text and returns the fully classified segments
-// (possibly empty, while a potential marker is held back).
+// (possibly empty, while a potential marker or separator is held back).
 func (s *Scanner) Feed(chunk string) []Segment {
 	data := s.pending + chunk
 	s.pending = ""
 	var out []Segment
 	for len(data) > 0 {
+		if s.atStart {
+			rest, decided := stripLeadingSeps(data)
+			if !decided {
+				// Only separators so far (or a trailing fragment that might
+				// complete one): keep holding until more input resolves it.
+				s.pending = data
+				return out
+			}
+			s.atStart = false
+			data = rest
+			if len(data) == 0 {
+				break
+			}
+		}
 		m := s.marker()
 		idx := strings.Index(data, m)
 		if idx < 0 {
@@ -93,14 +132,39 @@ func (s *Scanner) Feed(chunk string) []Segment {
 		}
 		s.inThink = !s.inThink
 		s.flipped = true
+		s.atStart = true // the section after a marker opens with separators
 		data = data[idx+len(m):]
 	}
 	return out
 }
 
-// Flush drops any held-back partial marker. Trailing fragments are truncation
-// artifacts (generation stopped mid-marker), never legitimate content, so they
-// are discarded. Flush reports whether anything was dropped.
+// stripLeadingSeps removes leading separator tokens (both renderings, any
+// count) from d. decided is false when everything in d is either consumed
+// separators or a remainder that is a strict prefix of one — i.e. more input
+// could still extend it — in which case d is returned unchanged and should be
+// held. A complete bare "<|sep|" is always strippable on its own: whether or
+// not a ">" follows, the result is identical.
+func stripLeadingSeps(d string) (rest string, decided bool) {
+	orig := d
+	for {
+		switch {
+		case strings.HasPrefix(d, sepFullToken):
+			d = d[len(sepFullToken):]
+		case strings.HasPrefix(d, sepBareToken):
+			d = d[len(sepBareToken):]
+		default:
+			if d == "" || strings.HasPrefix(sepBareToken, d) {
+				return orig, false
+			}
+			return d, true
+		}
+	}
+}
+
+// Flush drops any held-back partial marker or undecided separator bytes.
+// Trailing fragments are truncation artifacts (generation stopped mid-token),
+// never legitimate content, so they are discarded. Flush reports whether
+// anything was dropped.
 func (s *Scanner) Flush() (dropped bool) {
 	dropped = s.pending != ""
 	s.pending = ""

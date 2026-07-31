@@ -9,9 +9,11 @@ const MaxJSONRewriteBody = 8 << 20 // 8 MiB
 
 // RewriteAnthropicMessage rewrites a non-streaming Anthropic Messages
 // response body: text blocks containing leaked reasoning markers are split
-// into thinking/text blocks. It reports changed=false (and returns the input
-// bytes unchanged) when no marker was found — the common case — so callers can
-// return the original body verbatim.
+// into thinking/text blocks, and separator remnants at the start of text or
+// thinking blocks (emitted by backends that half-apply the split themselves)
+// are stripped. It reports changed=false (and returns the input bytes
+// unchanged) when neither was found — the common case — so callers can return
+// the original body verbatim.
 func RewriteAnthropicMessage(body []byte) (out []byte, changed bool, err error) {
 	var msg map[string]any
 	if err := json.Unmarshal(body, &msg); err != nil {
@@ -44,7 +46,19 @@ func RewriteAnthropicMessage(body []byte) (out []byte, changed bool, err error) 
 		text, _ := block[field].(string)
 		segs := sc.Feed(text)
 		if !sc.Flipped() {
-			newContent = append(newContent, item)
+			// No section markers: keep the block unless section-start
+			// separator tokens or a truncation tail were stripped.
+			joined := ""
+			for _, s := range segs {
+				joined += s.Text
+			}
+			if joined == text {
+				newContent = append(newContent, item)
+				continue
+			}
+			block[field] = joined
+			newContent = append(newContent, block)
+			changed = true
 			continue
 		}
 		for _, s := range mergeSegments(segs) {

@@ -277,6 +277,55 @@ func TestSSECleanStreamOddNetworkChunks(t *testing.T) {
 }
 
 // chunkReader returns s in step-sized reads to exercise frame reassembly.
+// The double-separator leak exactly as captured from a live mesh node:
+// "<|open|>think" + bare separator + full separator in each section start.
+func TestSSEDoubleSeparatorLeakTranslated(t *testing.T) {
+	in := msgStart() +
+		blkStart(0, "text") +
+		textDelta(0, "<|open|>think<|sep|<|sep|>Check a couple more.\n<|close|>think<|sep|<|sep|>Here's the summary.") +
+		blkStop(0) +
+		msgEnd()
+	got := describe(parseStream(t, rewrite(t, in)))
+	want := `msg_start [0:text] [0:stop] [1:thinking] +thinking_delta"Check a couple more.\n" [1:stop] [2:text] +text_delta"Here's the summary." [2:stop] msg_delta msg_stop`
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A lone separator at the start of a fresh text block, with no section
+// marker anywhere in the stream (backend half-applied the split): only the
+// separator delta is touched; everything around it stays byte-identical.
+func TestSSEBareSeparatorAtBlockStartStripped(t *testing.T) {
+	pre := msgStart() + blkStart(0, "thinking") + thinkDelta(0, "counting files") + blkStop(0) + blkStart(1, "text")
+	in := pre + textDelta(1, "<|sep|>Here's a summary ") + textDelta(1, "of your home directory.") + blkStop(1) + msgEnd()
+	out := rewrite(t, in)
+	fixed := pre +
+		ev("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": float64(1),
+			"delta": map[string]any{"type": "text_delta", "text": "Here's a summary "},
+		}) +
+		textDelta(1, "of your home directory.") + blkStop(1) + msgEnd()
+	if out != fixed {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, fixed)
+	}
+}
+
+// A separator straddling two deltas must still be stripped.
+func TestSSESeparatorSplitAcrossDeltas(t *testing.T) {
+	in := msgStart() + blkStart(0, "text") +
+		textDelta(0, "<|se") + textDelta(0, "p|>Hello.") + blkStop(0) + msgEnd()
+	out := rewrite(t, in)
+	fixed := msgStart() + blkStart(0, "text") +
+		ev("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": float64(0),
+			"delta": map[string]any{"type": "text_delta", "text": "Hello."},
+		}) +
+		blkStop(0) + msgEnd()
+	if out != fixed {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, fixed)
+	}
+}
+
 type chunkReader struct {
 	s    string
 	step int
