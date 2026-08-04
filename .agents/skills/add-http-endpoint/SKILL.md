@@ -16,6 +16,7 @@ is a security bug:
 | Self-service management | `/manage/…` | Neon Auth JWT, scoped to `sub` | `keysapi` / `walletsapi` / `instancesapi` / `regionsapi`, composed by `manageapi.Router` |
 | Internal control | `/internal/…` | `INTERNAL_CONTROL_TOKEN` bearer (or node JWT); never browsers | `aclapi`, `nodecred` |
 | Permissionless | `GET /v1/services` only | none | `catalog` |
+| Proxy (served locally) | `GET /v1/service/{service}/v1/models` | opentela API key | `catalog` (OpenAI-shaped list, not forwarded) |
 | Proxy | everything else | opentela API key | `proxy`, `auth` |
 
 ## 2. Write the handler

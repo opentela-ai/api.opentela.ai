@@ -25,7 +25,22 @@ configured upstream.
 | `NODE_CREDENTIAL_SIGNING_KEY` | no* | —       | Base64 Ed25519 seed or private key; enables trusted-node credentials |
 | `NODE_CREDENTIAL_VERIFY_KEYS` | no | —       | Comma-separated `kid:base64-public-key` verification keys for rotation overlap |
 
+### GPU performance pipeline (optional)
+
+| Variable                 | Required | Default | Purpose                              |
+|--------------------------|----------|---------|--------------------------------------|
+| `CLICKHOUSE_URL`         | no       | —       | ClickHouse HTTP endpoint; enables per-request performance sampling and `GET /v1/leaderboard` |
+| `CLICKHOUSE_DATABASE`    | no       | `opentela` | Database holding the perf tables |
+| `CLICKHOUSE_USERNAME`    | no       | —       | ClickHouse user (sent as `X-ClickHouse-User`) |
+| `CLICKHOUSE_PASSWORD`    | no       | —       | ClickHouse password (sent as `X-ClickHouse-Key`) |
+| `PERF_FLUSH_INTERVAL`    | no       | `5s`    | Batch flush interval for perf inserts |
+| `PERF_BATCH_SIZE`        | no       | `1024`  | Max rows per ClickHouse insert |
+| `PERF_QUEUE_SIZE`        | no       | `16384` | Buffered-sample queue; excess samples are dropped and logged |
+| `PERF_PEER_CACHE_TTL`    | no       | `5m`    | TTL for the peer→GPU attribution cache |
+| `LEADERBOARD_CACHE_TTL`  | no       | `1m`    | TTL for cached leaderboard responses |
+
 `INTERNAL_CONTROL_TOKEN` is required when `NODE_CREDENTIAL_SIGNING_KEY` is set.
+`CLICKHOUSE_USERNAME`/`CLICKHOUSE_PASSWORD` require `CLICKHOUSE_URL`.
 
 ## Run
 
@@ -86,9 +101,11 @@ envelopes.
 - `ANTHROPIC_AUTH_TOKEN` is required by Claude Code; set both auth variables to
   the same opentela key.
 - The base URL must include the service prefix (`/v1/service/llm`) — the bare
-  `/v1/messages` root is not routed by the mesh. `GET .../v1/models` is not
-  routed on that prefix either; with the three default-model variables set,
-  Claude Code never needs it.
+  `/v1/messages` root is not routed by the mesh. `GET .../v1/models` is served
+  locally by this gateway as an OpenAI-shaped list of that service's models
+  (API-key gated), so generic OpenAI-compatible SDKs can discover models
+  instead of the upstream's "no provider found"; Claude Code itself does not
+  need it as long as the three default-model variables are set.
 - `<model>` must be a served-model alias — Claude Code cannot use model names
   containing `/`.
 - If prefix caching suffers from Claude Code's per-request attribution hash,
@@ -135,6 +152,91 @@ split themselves.
   misclassified. Those strings are special-token renderings that do not occur
   in legitimate output, so this is accepted; the fix still belongs on the
   inference node (correct `--reasoning-parser`), this is a safety net.
+
+## OpenAI-compatible model list
+
+Generic OpenAI-compatible SDKs hard-code `GET {base}/models` to discover what
+they can call. The mesh only routes `/v1/service/<service>/` for inference, so
+that request would otherwise reach the upstream and come back `503 no provider
+found`. This gateway serves it locally instead:
+
+```bash
+curl -H "Authorization: Bearer <key>" \
+  https://api.opentela.ai/v1/service/llm/v1/models
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "moonshotai/Kimi-K3", "object": "model", "created": 1754012400, "owned_by": "opentela"}
+  ]
+}
+```
+
+The list is scoped to the single service named in the path, built from the
+same distilled table as `GET /v1/services` and cached the same way. It is
+API-key gated (like the rest of the proxy plane), so `Authorization: Bearer`
+or `x-api-key` is required. An unknown service returns `200` with an empty
+`data` array. Claude Code does not need this endpoint; set the three
+`ANTHROPIC_DEFAULT_*_MODEL` variables instead.
+
+## GPU performance sampling and leaderboard (optional, ClickHouse)
+
+Every inference response the mesh routes is stamped with an `X-Computing-Node`
+header naming the serving peer. When `CLICKHOUSE_URL` is set, the streaming
+proxy measures each stamped response — time-to-first-byte, time-to-first-
+content-token, generation duration, and token counts (parsed incrementally
+from the OpenAI and Anthropic SSE frames, or from the JSON body for
+non-streaming replies) — and resolves the peer to its GPU model via the node
+table it already fetches for the catalog.
+
+Samples are batched into `perf_samples` (30-day TTL) and roll up into the
+`perf_hourly` AggregatingMergeTree, which serves the public leaderboard:
+
+```bash
+curl "https://api.opentela.ai/v1/leaderboard?hours=168&service=llm"
+```
+
+```json
+{
+  "generated_at": "2026-08-04T20:55:31Z",
+  "window_hours": 168,
+  "entries": [
+    {
+      "gpu_model": "NVIDIA GeForce RTX 4090",
+      "model": "gpt-4o",
+      "requests": 101,
+      "providers": 8,
+      "success_rate": 0.99,
+      "avg_output_tokens_per_sec": 55.94,
+      "p50_output_tokens_per_sec": 56,
+      "ttft_p50_ms": 224,
+      "ttft_p90_ms": 244,
+      "ttft_p99_ms": 248
+    }
+  ]
+}
+```
+
+`hours` defaults to 168 (max 720); `service` and `model` filter the rows. The
+endpoint needs no API key, like `/v1/services`.
+
+**Privacy**: ingestion persists only counters, timings, GPU model, and the
+served model name — never API keys, prompts, response payloads, or user
+identity. The serving peer is stored only as a truncated SHA-256 fingerprint
+(`peer_fp`) used to count distinct providers.
+
+**Setup**: point the gateway at a ClickHouse HTTP endpoint and apply the DDL
+(idempotent — safe to re-run):
+
+```bash
+clickhouse-client --database opentela --multiquery < clickhouse/schema.sql
+```
+
+Rollups are maintained by the `perf_hourly_mv` materialized view; no cron or
+scheduler is needed. Without `CLICKHOUSE_URL` the pipeline is fully inert: no
+hooks are installed and `/v1/leaderboard` is not mounted.
 
 ## Management and ACL API (optional)
 

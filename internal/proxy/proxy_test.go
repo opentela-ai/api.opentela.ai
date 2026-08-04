@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/opentela-ai/api/internal/perf"
 )
 
 func TestProxyForwardsRequestAndResponse(t *testing.T) {
@@ -291,5 +293,48 @@ func TestMessagesStreamWithoutMarkersIsUntouched(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != clean {
 		t.Fatalf("clean stream modified:\n--- in ---\n%s\n--- out ---\n%s", clean, body)
+	}
+}
+
+type capturingRecorder struct{ samples []perf.Sample }
+
+func (r *capturingRecorder) Observe(s perf.Sample) { r.samples = append(r.samples, s) }
+
+// The perf hook observes responses through the same ModifyResponse chain the
+// client sees (post-CORS-strip, post-thinkfix) and must not distort the
+// stream while sampling it.
+func TestPerfHookMeasuresStreamTransparently(t *testing.T) {
+	sse := "data: {\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":11}}\n\n" +
+		"data: [DONE]\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Computing-Node", "peer-9")
+		_, _ = io.WriteString(w, sse)
+	}))
+	defer upstream.Close()
+
+	rec := &capturingRecorder{}
+	target, _ := url.Parse(upstream.URL)
+	front := httptest.NewServer(NewWithPerfHook(target, perf.Hook(rec, nil)))
+	defer front.Close()
+
+	resp, err := http.Post(front.URL+"/v1/service/chat/v1/chat/completions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != sse {
+		t.Fatalf("stream modified by measurement:\n--- in ---\n%s\n--- out ---\n%s", sse, body)
+	}
+	if len(rec.samples) != 1 {
+		t.Fatalf("samples = %d, want 1", len(rec.samples))
+	}
+	s := rec.samples[0]
+	if s.Model != "gpt-4o" || s.OutputTokens != 11 || s.InputTokens != 3 {
+		t.Fatalf("sample probe wrong: %+v", s)
+	}
+	if s.PeerFP == "" || s.TotalMs <= 0 || s.ClientAbort {
+		t.Fatalf("sample meta wrong: %+v", s)
 	}
 }

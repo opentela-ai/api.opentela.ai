@@ -36,6 +36,24 @@ type Response struct {
 	Services []Service `json:"services"`
 }
 
+// Model is one entry in the OpenAI-shaped model list served at
+// /v1/service/{service}/v1/models. ID is the served-model alias (the value of
+// a peer's "model=" identity group); the list is scoped to the single service
+// named in the request path. Created is the catalogue's last refresh time — a
+// stable "as of" stamp, not a per-model creation date the mesh does not know.
+type Model struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+// ModelList is the OpenAI-shaped {"object":"list","data":[...]} response.
+type ModelList struct {
+	Object string  `json:"object"`
+	Data   []Model `json:"data"`
+}
+
 // PeerService is the subset of an upstream service entry this package reads.
 type PeerService struct {
 	Name          string   `json:"name"`
@@ -143,22 +161,89 @@ func NewWithPolicies(upstream *url.URL, ttl time.Duration, policy policyStore) *
 	}
 }
 
+// ServeHTTP dispatches by route. GET /v1/services — registered without a
+// {service} path value — serves the distilled catalogue. GET /v1/service/
+// {service}/v1/models serves an OpenAI-shaped model list scoped to that one
+// service, so OpenAI-compatible clients that hard-code GET {base}/models get a
+// valid list instead of the upstream's "no provider found" 503 (the mesh route
+// is for inference, not listing). Both responses share the same upstream
+// fetch, cache, and policy filtering; the caller (internal/server) decides per
+// route whether the API-key middleware is applied.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if svc := r.PathValue("service"); svc != "" {
+		h.serveModels(w, r, svc)
+		return
+	}
+	h.serveCatalogue(w, r)
+}
+
+func (h *Handler) serveCatalogue(w http.ResponseWriter, r *http.Request) {
 	services, err := h.services(r.Context())
 	if err != nil {
-		status := http.StatusBadGateway
-		var policyErr errPolicyUnavailable
-		if errors.As(err, &policyErr) {
-			// Once policy filtering is enabled, an unavailable policy store makes
-			// the permissionless/trusted classification indeterminate. Fail
-			// closed as a control-plane outage rather than presenting unfiltered
-			// mesh data as a public catalogue.
-			status = http.StatusServiceUnavailable
-		}
-		writeJSON(w, status, map[string]string{"error": "catalogue unavailable"})
+		writeCatalogueError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, Response{Services: services})
+}
+
+// serveModels writes an OpenAI-shaped model list for the named service. An
+// unknown service yields an empty list (still 200): the OpenAI model-list
+// contract is a list, not a lookup, and some clients reject a 404 here.
+func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, service string) {
+	services, err := h.services(r.Context())
+	if err != nil {
+		writeCatalogueError(w, err)
+		return
+	}
+	h.mu.Lock()
+	created := h.fetched.Unix()
+	h.mu.Unlock()
+	if created < 0 {
+		created = 0
+	}
+	writeJSON(w, http.StatusOK, ModelList{
+		Object: "list",
+		Data:   modelsForService(services, service, created),
+	})
+}
+
+// modelsForService returns one OpenAI Model entry per served-model alias the
+// named service advertises. The mesh reports models as "model=<alias>"
+// identity groups; Summarise already dedupes and sorts them, so this just
+// reshapes that list.
+func modelsForService(services []Service, service string, created int64) []Model {
+	for _, svc := range services {
+		if svc.Name != service {
+			continue
+		}
+		out := make([]Model, 0, len(svc.Models))
+		for _, id := range svc.Models {
+			out = append(out, Model{
+				ID:      id,
+				Object:  "model",
+				Created: created,
+				OwnedBy: "opentela",
+			})
+		}
+		return out
+	}
+	return nil
+}
+
+// writeCatalogueError maps an upstream or policy failure to the same status as
+// the public catalogue: a control-plane outage (policy lookup down) is 503;
+// anything else is 502. Shared by the catalogue and the model list, which use
+// the same upstream fetch.
+func writeCatalogueError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	var policyErr errPolicyUnavailable
+	if errors.As(err, &policyErr) {
+		// Once policy filtering is enabled, an unavailable policy store makes
+		// the permissionless/trusted classification indeterminate. Fail closed
+		// as a control-plane outage rather than presenting unfiltered mesh data.
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]string{"error": "catalogue unavailable"})
 }
 
 func (h *Handler) services(ctx context.Context) ([]Service, error) {

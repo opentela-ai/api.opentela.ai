@@ -43,6 +43,20 @@ type Config struct {
 	NodeCredentialSigningKey ed25519.PrivateKey
 	NodeCredentialVerifyKeys map[string]ed25519.PublicKey
 	NodeCredentialEnabled    bool
+
+	// GPU performance pipeline (optional). Enabled by CLICKHOUSE_URL: the
+	// proxy samples every routed inference response into ClickHouse and the
+	// public /v1/leaderboard endpoint is mounted. Everything stays disabled
+	// otherwise; auxiliary settings without CLICKHOUSE_URL are rejected below.
+	ClickHouseURL       *url.URL
+	ClickHouseDatabase  string
+	ClickHouseUsername  string
+	ClickHousePassword  string
+	PerfFlushInterval   time.Duration // sample batch insert cadence
+	PerfBatchSize       int           // max samples per insert
+	PerfQueueSize       int           // in-memory backlog before dropping
+	PerfPeerCacheTTL    time.Duration // node-table GPU inventory cache
+	LeaderboardCacheTTL time.Duration // public aggregate cache
 }
 
 // Load reads configuration from environment variables, applies defaults, and
@@ -159,6 +173,44 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("INTERNAL_CONTROL_TOKEN is required when NODE_CREDENTIAL_SIGNING_KEY is set")
 	}
 
+	var clickHouseURL *url.URL
+	if raw := os.Getenv("CLICKHOUSE_URL"); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("CLICKHOUSE_URL must be an absolute URL (e.g. http://clickhouse:8123)")
+		}
+		clickHouseURL = u
+	}
+	clickHouseDatabase := stringEnv("CLICKHOUSE_DATABASE", "opentela")
+	if !validCHIdentifier(clickHouseDatabase) {
+		return nil, fmt.Errorf("CLICKHOUSE_DATABASE must match [A-Za-z0-9_]{1,64}")
+	}
+	clickHouseUsername := os.Getenv("CLICKHOUSE_USERNAME")
+	clickHousePassword := os.Getenv("CLICKHOUSE_PASSWORD")
+	if clickHouseURL == nil && (clickHouseUsername != "" || clickHousePassword != "") {
+		return nil, fmt.Errorf("CLICKHOUSE_USERNAME and CLICKHOUSE_PASSWORD require CLICKHOUSE_URL")
+	}
+	perfFlushInterval, err := durationEnv("PERF_FLUSH_INTERVAL", 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	perfBatchSize, err := intEnv("PERF_BATCH_SIZE", 1024)
+	if err != nil {
+		return nil, err
+	}
+	perfQueueSize, err := intEnv("PERF_QUEUE_SIZE", 16384)
+	if err != nil {
+		return nil, err
+	}
+	perfPeerCacheTTL, err := durationEnv("PERF_PEER_CACHE_TTL", 5*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	leaderboardCacheTTL, err := durationEnv("LEADERBOARD_CACHE_TTL", 1*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		UpstreamURL:  upstream,
 		DatabaseURL:  dbURL,
@@ -184,7 +236,28 @@ func Load() (*Config, error) {
 		NodeCredentialSigningKey: nodeCredentialSigningKey,
 		NodeCredentialVerifyKeys: nodeCredentialVerifyKeys,
 		NodeCredentialEnabled:    len(nodeCredentialVerifyKeys) > 0 && len(nodeCredentialSigningKey) == ed25519.PrivateKeySize,
+		ClickHouseURL:            clickHouseURL,
+		ClickHouseDatabase:       clickHouseDatabase,
+		ClickHouseUsername:       clickHouseUsername,
+		ClickHousePassword:       clickHousePassword,
+		PerfFlushInterval:        perfFlushInterval,
+		PerfBatchSize:            perfBatchSize,
+		PerfQueueSize:            perfQueueSize,
+		PerfPeerCacheTTL:         perfPeerCacheTTL,
+		LeaderboardCacheTTL:      leaderboardCacheTTL,
 	}, nil
+}
+
+func validCHIdentifier(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func stringEnv(key, def string) string {

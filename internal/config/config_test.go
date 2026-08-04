@@ -200,3 +200,70 @@ func TestLoadNodeCredentialSigningRequiresInternalToken(t *testing.T) {
 		t.Fatal("NodeCredentialEnabled should be true")
 	}
 }
+
+func TestLoadClickHousePipeline(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("CLICKHOUSE_URL", "https://ch.fly.dev:8443")
+	t.Setenv("CLICKHOUSE_USERNAME", "default")
+	t.Setenv("CLICKHOUSE_PASSWORD", "secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ClickHouseURL == nil || cfg.ClickHouseURL.Host != "ch.fly.dev:8443" {
+		t.Errorf("ClickHouseURL = %v", cfg.ClickHouseURL)
+	}
+	if cfg.ClickHouseDatabase != "opentela" {
+		t.Errorf("ClickHouseDatabase = %q, want opentela", cfg.ClickHouseDatabase)
+	}
+	if cfg.PerfFlushInterval != 5*time.Second || cfg.PerfBatchSize != 1024 || cfg.PerfQueueSize != 16384 {
+		t.Errorf("perf settings = %v/%d/%d", cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
+	}
+}
+
+func TestLoadClickHouseDisabledByDefault(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ClickHouseURL != nil {
+		t.Errorf("ClickHouseURL = %v, want nil (pipeline off)", cfg.ClickHouseURL)
+	}
+}
+
+func TestLoadRejectsClickHouseAuthWithoutURL(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("CLICKHOUSE_PASSWORD", "secret")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with CLICKHOUSE_PASSWORD but no CLICKHOUSE_URL")
+	}
+}
+
+func TestLoadRejectsBadClickHouseValues(t *testing.T) {
+	base := func() {
+		t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+		t.Setenv("DATABASE_URL", "postgres://x")
+	}
+	base()
+	t.Setenv("CLICKHOUSE_URL", "not a url")
+	if _, err := Load(); err == nil {
+		t.Error("Load() succeeded with relative CLICKHOUSE_URL")
+	}
+	t.Setenv("CLICKHOUSE_URL", "http://ch:8123")
+	t.Setenv("CLICKHOUSE_DATABASE", "bad;db")
+	if _, err := Load(); err == nil {
+		t.Error("Load() succeeded with non-identifier CLICKHOUSE_DATABASE")
+	}
+	t.Setenv("CLICKHOUSE_DATABASE", "opentela")
+	t.Setenv("PERF_BATCH_SIZE", "0")
+	if _, err := Load(); err == nil {
+		t.Error("Load() succeeded with PERF_BATCH_SIZE=0")
+	}
+}

@@ -34,6 +34,15 @@ var corsResponseHeaders = []string{
 // thinking blocks (internal/thinkfix). The rewrite is marker-triggered —
 // marker-free responses (e.g. vLLM backends) pass through byte-for-byte.
 func New(target *url.URL) *httputil.ReverseProxy {
+	return NewWithPerfHook(target, nil)
+}
+
+// NewWithPerfHook is New plus an optional response hook (internal/perf),
+// invoked last in the ModifyResponse chain — after CORS stripping and the
+// thinkfix rewrite — so performance measurement observes the exact stream the
+// client receives. The hook wraps the body in a measuring reader; it must not
+// buffer.
+func NewWithPerfHook(target *url.URL, perfHook func(*http.Response) error) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		FlushInterval: -1,
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -44,7 +53,13 @@ func New(target *url.URL) *httputil.ReverseProxy {
 			for _, h := range corsResponseHeaders {
 				resp.Header.Del(h)
 			}
-			return thinkfix.MaybeWrapResponse(resp)
+			if err := thinkfix.MaybeWrapResponse(resp); err != nil {
+				return err
+			}
+			if perfHook != nil {
+				return perfHook(resp)
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy: upstream error for %s %s: %v", r.Method, r.URL.Path, err)

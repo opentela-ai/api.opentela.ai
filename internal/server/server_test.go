@@ -17,6 +17,17 @@ func proxyStub() http.Handler {
 	})
 }
 
+// do issues a request with an optional Bearer key and returns the recorder.
+func do(h http.Handler, method, path, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestHealthzOpen(t *testing.T) {
 	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -24,6 +35,21 @@ func TestHealthzOpen(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthz code = %d, want 200", rec.Code)
+	}
+}
+
+// GET /v1/leaderboard is permissionless like /v1/services: reachable without
+// a key while neighboring inference routes stay gated.
+func TestLeaderboardIsPermissionless(t *testing.T) {
+	leader := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := NewWithInternal(stubValidator{valid: false}, proxyStub(), nil, nil, nil, leader, nil)
+	if rec := do(h, http.MethodGet, "/v1/leaderboard", ""); rec.Code != http.StatusOK {
+		t.Fatalf("unauthenticated leaderboard code = %d, want 200", rec.Code)
+	}
+	if rec := do(h, http.MethodGet, "/v1/service/x/v1/chat/completions", ""); rec.Code == http.StatusOK {
+		t.Fatalf("inference route unexpectedly open")
 	}
 }
 
@@ -80,7 +106,7 @@ func TestInternalACLRouteBeatsProxyCatchAll(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("internal"))
 	})
-	h := NewWithInternal(stubValidator{valid: false}, proxyStub(), nil, internal, nil, nil)
+	h := NewWithInternal(stubValidator{valid: false}, proxyStub(), nil, internal, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate", nil)
 	rec := httptest.NewRecorder()
@@ -225,5 +251,46 @@ func TestPublicCatalogueCarriesCORS(t *testing.T) {
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
 		t.Fatalf("ACAO=%q, want echoed origin", got)
+	}
+}
+
+// GET /v1/service/{service}/v1/models is served locally by the catalogue
+// (OpenAI-shaped list) behind the API key, never forwarded to the upstream.
+// Inference traffic on the same prefix still proxies.
+func TestModelsRouteServedLocallyAndGated(t *testing.T) {
+	catalogue := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot) // reached the catalogue, not the proxy
+	})
+	h := New(stubValidator{valid: true}, proxyStub(), nil, catalogue, nil)
+
+	// No key → gated, never reaches the catalogue or the proxy.
+	if rec := do(h, http.MethodGet, "/v1/service/llm/v1/models", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no-key code=%d, want 401", rec.Code)
+	}
+
+	// Valid key → served by the catalogue (418), not forwarded ("proxied").
+	rec := do(h, http.MethodGet, "/v1/service/llm/v1/models", "good")
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("valid-key code=%d body=%q, want 418 (catalogue served locally, not proxied)", rec.Code, rec.Body.String())
+	}
+
+	// Any other service on the same path shape is served locally too.
+	if rec := do(h, http.MethodGet, "/v1/service/sandbox/v1/models", "good"); rec.Code != http.StatusTeapot {
+		t.Fatalf("sandbox code=%d body=%q, want 418", rec.Code, rec.Body.String())
+	}
+
+	// A POST on the same prefix is NOT claimed by the GET-only route, so it
+	// reaches the proxy for inference as before.
+	if rec := do(h, http.MethodPost, "/v1/service/llm/v1/chat/completions", "good"); rec.Code != http.StatusOK || rec.Body.String() != "proxied" {
+		t.Fatalf("post chat code=%d body=%q, want 200/proxied", rec.Code, rec.Body.String())
+	}
+}
+
+// With no catalogue wired, GET /v1/service/{service}/v1/models falls through
+// to the auth-gated proxy like everything else (no open passthrough).
+func TestModelsRouteFallsThroughWhenCatalogueAbsent(t *testing.T) {
+	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
+	if rec := do(h, http.MethodGet, "/v1/service/llm/v1/models", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d, want 401", rec.Code)
 	}
 }

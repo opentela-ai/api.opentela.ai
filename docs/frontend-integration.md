@@ -271,6 +271,21 @@ The same service prefix serves the Anthropic Messages API
 (`POST /v1/service/llm/v1/messages`) for Anthropic SDK clients and Claude Code —
 see “Using with Claude Code (Anthropic Messages API)” in `README.md`.
 
+OpenAI-compatible SDKs that hard-code `GET {base}/models` are served locally
+in the OpenAI list shape, so a browser can populate a model picker the same
+way it lists from OpenAI:
+
+```js
+const res = await fetch("https://api.opentela.ai/v1/service/llm/v1/models", {
+  headers: { Authorization: `Bearer ${apiKey}` }, // or x-api-key
+});
+// {"object":"list","data":[{"id":"…","object":"model","created":…,"owned_by":"opentela"}]}
+```
+
+The list is scoped to the one service named in the path and cached like
+`GET /v1/services`; it is API-key gated, so it is cross-origin and needs the
+same `CORS_ALLOWED_ORIGINS` allowlist as the rest of the `/v1/*` proxy plane.
+
 From a browser, this `/v1/*` call is cross-origin, so the frontend origin must be
 in `CORS_ALLOWED_ORIGINS` (prereq #1) — the proxy plane is CORS-enabled with the
 same allowlist as `/manage/`, and the credential-less preflight `OPTIONS` is
@@ -278,6 +293,29 @@ answered before auth.
 
 Note: revocation is not instant — a revoked key may keep working until its 14-day
 cache entry expires or the server restarts.
+
+## Step 8 (optional) — Show the GPU leaderboard
+
+`GET /v1/leaderboard` is public (no key, CORS-enabled like the rest of `/v1/*`)
+and reports measured throughput and time-to-first-token per GPU model, taken
+from the streaming proxy itself:
+
+```js
+const res = await fetch("https://api.opentela.ai/v1/leaderboard?hours=168&service=llm");
+const { generated_at, window_hours, entries } = await res.json();
+// entries: [{
+//   gpu_model: "NVIDIA GeForce RTX 4090", model: "gpt-4o",
+//   requests: 101, providers: 8, success_rate: 0.99,
+//   avg_output_tokens_per_sec: 55.94, p50_output_tokens_per_sec: 56,
+//   ttft_p50_ms: 224, ttft_p90_ms: 244, ttft_p99_ms: 248
+// }, …]
+```
+
+`hours` defaults to 168 (max 720); `service` and `model` are optional filters.
+Responses are cached server-side (~1 min), so polling at page load is enough.
+When the backend has no ClickHouse configured the endpoint is not mounted and
+the request falls through to the proxy plane (`404` without a key) — render the
+section as unavailable rather than showing an error.
 
 ---
 
