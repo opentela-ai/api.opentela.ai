@@ -286,7 +286,9 @@ func TestResolverCachesAndHandlesCPUOnly(t *testing.T) {
 	fetches := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fetches++
-		_, _ = w.Write([]byte(`{"gpu-peer":{"hardware":{"gpus":[{"name":"Tesla T4"}]}},"cpu-peer":{"hardware":{"gpus":[]}}}`))
+		// Production shape: DNT keys carry a leading slash; the slash-less id
+		// field inside the entry is what X-Computing-Node stamps carry.
+		_, _ = w.Write([]byte(`{"/gpu-peer":{"id":"gpu-peer","hardware":{"gpus":[{"name":"Tesla T4"}]}},"/id-less":{"hardware":{"gpus":[{"name":"NVIDIA GB10"}]}},"/cpu-peer":{"id":"cpu-peer","hardware":{"gpus":[]}}}`))
 	}))
 	defer srv.Close()
 	u, _ := url.Parse(srv.URL)
@@ -294,6 +296,9 @@ func TestResolverCachesAndHandlesCPUOnly(t *testing.T) {
 
 	if got := r.Resolve(context.Background(), "gpu-peer"); got.Model != "Tesla T4" || got.Count != 1 {
 		t.Errorf("gpu-peer = %+v", got)
+	}
+	if got := r.Resolve(context.Background(), "id-less"); got.Model != "NVIDIA GB10" {
+		t.Errorf("id-less (slash-key fallback) = %+v", got)
 	}
 	if got := r.Resolve(context.Background(), "cpu-peer"); got.Model != "" || got.Count != 0 {
 		t.Errorf("cpu-peer = %+v, want empty", got)

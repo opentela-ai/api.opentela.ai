@@ -44,10 +44,20 @@ type Config struct {
 	NodeCredentialVerifyKeys map[string]ed25519.PublicKey
 	NodeCredentialEnabled    bool
 
-	// GPU performance pipeline (optional). Enabled by CLICKHOUSE_URL: the
-	// proxy samples every routed inference response into ClickHouse and the
-	// public /v1/leaderboard endpoint is mounted. Everything stays disabled
-	// otherwise; auxiliary settings without CLICKHOUSE_URL are rejected below.
+	// GPU performance pipeline (optional). The proxy samples every routed
+	// inference response into an analytics store and the public
+	// /v1/leaderboard endpoint is mounted. Two interchangeable backends:
+	//   - Tinybird Forward: enabled by TINYBIRD_APPEND_TOKEN +
+	//     TINYBIRD_LEADERBOARD_TOKEN (+ optional TINYBIRD_HOST). Managed; the
+	//     schema and endpoint live in tinybird/ and deploy via tb deploy.
+	//   - Self-managed ClickHouse: enabled by CLICKHOUSE_URL (and the schema
+	//     in clickhouse/schema.sql).
+	// The backends are mutually exclusive. Everything stays disabled when
+	// neither is set; auxiliary settings without their backend switch are
+	// rejected below.
+	TinybirdHost        *url.URL
+	TinybirdAppendToken string
+	TinybirdLeaderboard string
 	ClickHouseURL       *url.URL
 	ClickHouseDatabase  string
 	ClickHouseUsername  string
@@ -190,6 +200,22 @@ func Load() (*Config, error) {
 	if clickHouseURL == nil && (clickHouseUsername != "" || clickHousePassword != "") {
 		return nil, fmt.Errorf("CLICKHOUSE_USERNAME and CLICKHOUSE_PASSWORD require CLICKHOUSE_URL")
 	}
+	var tinybirdHost *url.URL
+	if raw := stringEnv("TINYBIRD_HOST", "https://api.tinybird.co"); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("TINYBIRD_HOST must be an absolute URL (e.g. https://api.tinybird.co)")
+		}
+		tinybirdHost = u
+	}
+	tinybirdAppend := os.Getenv("TINYBIRD_APPEND_TOKEN")
+	tinybirdRead := os.Getenv("TINYBIRD_LEADERBOARD_TOKEN")
+	if (tinybirdAppend == "") != (tinybirdRead == "") {
+		return nil, fmt.Errorf("TINYBIRD_APPEND_TOKEN and TINYBIRD_LEADERBOARD_TOKEN must be set together")
+	}
+	if tinybirdAppend != "" && clickHouseURL != nil {
+		return nil, fmt.Errorf("CLICKHOUSE_URL and TINYBIRD_APPEND_TOKEN are mutually exclusive — pick one perf backend")
+	}
 	perfFlushInterval, err := durationEnv("PERF_FLUSH_INTERVAL", 5*time.Second)
 	if err != nil {
 		return nil, err
@@ -236,6 +262,9 @@ func Load() (*Config, error) {
 		NodeCredentialSigningKey: nodeCredentialSigningKey,
 		NodeCredentialVerifyKeys: nodeCredentialVerifyKeys,
 		NodeCredentialEnabled:    len(nodeCredentialVerifyKeys) > 0 && len(nodeCredentialSigningKey) == ed25519.PrivateKeySize,
+		TinybirdHost:             tinybirdHost,
+		TinybirdAppendToken:      tinybirdAppend,
+		TinybirdLeaderboard:      tinybirdRead,
 		ClickHouseURL:            clickHouseURL,
 		ClickHouseDatabase:       clickHouseDatabase,
 		ClickHouseUsername:       clickHouseUsername,

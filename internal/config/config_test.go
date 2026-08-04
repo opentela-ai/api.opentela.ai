@@ -267,3 +267,59 @@ func TestLoadRejectsBadClickHouseValues(t *testing.T) {
 		t.Error("Load() succeeded with PERF_BATCH_SIZE=0")
 	}
 }
+
+func TestLoadTinybirdPipeline(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("TINYBIRD_APPEND_TOKEN", "append-token")
+	t.Setenv("TINYBIRD_LEADERBOARD_TOKEN", "read-token")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.TinybirdHost == nil || cfg.TinybirdHost.Host != "api.tinybird.co" {
+		t.Errorf("TinybirdHost = %v, want default api.tinybird.co", cfg.TinybirdHost)
+	}
+	if cfg.TinybirdAppendToken != "append-token" || cfg.TinybirdLeaderboard != "read-token" {
+		t.Errorf("Tinybird tokens = %q/%q", cfg.TinybirdAppendToken, cfg.TinybirdLeaderboard)
+	}
+}
+
+func TestLoadTinybirdHostOverride(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("TINYBIRD_APPEND_TOKEN", "append-token")
+	t.Setenv("TINYBIRD_LEADERBOARD_TOKEN", "read-token")
+	t.Setenv("TINYBIRD_HOST", "https://branch-api.tinybird.co")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := cfg.TinybirdHost.String(); got != "https://branch-api.tinybird.co" {
+		t.Errorf("TinybirdHost = %q", got)
+	}
+}
+
+func TestLoadTinybirdPartialIsError(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("TINYBIRD_APPEND_TOKEN", "append-token")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with TINYBIRD_APPEND_TOKEN but no TINYBIRD_LEADERBOARD_TOKEN")
+	}
+}
+
+func TestLoadRejectsTinybirdAndClickHouseTogether(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("CLICKHOUSE_URL", "https://ch.fly.dev:8443")
+	t.Setenv("TINYBIRD_APPEND_TOKEN", "append-token")
+	t.Setenv("TINYBIRD_LEADERBOARD_TOKEN", "read-token")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded with both ClickHouse and Tinybird backends")
+	}
+}

@@ -1,0 +1,51 @@
+TOKEN leaderboard_read READ
+
+DESCRIPTION >
+    Public GPU performance leaderboard: a percentile aggregate of perf_samples
+    per (gpu_model, model) over a lookback window. Mirrors internal/leaderboard.
+
+NODE leaderboard
+SQL >
+    %
+    SELECT
+        gpu_model,
+        model,
+        count() AS requests,
+        countIf(status >= 500) AS server_errors,
+        countIf(client_abort) AS client_aborts,
+        uniq(peer_fp) AS providers,
+        round(if(sum(gen_ms) > 0, sum(output_tokens) * 1000.0 / sum(gen_ms), 0), 2) AS avg_tps,
+        round(quantileTDigest(0.5)(tps), 2) AS p50_tps,
+        round(quantileTDigest(0.5)(ttft_ms), 1) AS ttft_p50_ms,
+        round(quantileTDigest(0.9)(ttft_ms), 1) AS ttft_p90_ms,
+        round(quantileTDigest(0.99)(ttft_ms), 1) AS ttft_p99_ms
+    FROM
+    (
+        SELECT
+            gpu_model,
+            model,
+            peer_fp,
+            status,
+            client_abort,
+            ttft_ms,
+            output_tokens,
+            if(first_token_ms > 0, greatest(total_ms - first_token_ms, 0), total_ms) AS gen_ms,
+            if(output_tokens > 0,
+               toFloat32(output_tokens * 1000.0 / greatest(gen_ms, 1)),
+               toFloat32(0)) AS tps
+        FROM perf_samples
+        WHERE ts >= now() - INTERVAL {{Int32(hours, 168)}} HOUR
+            AND gpu_model != ''
+            AND model != ''
+            {% if defined(service) %}
+            AND service = {{String(service)}}
+            {% end %}
+            {% if defined(model) %}
+            AND model = {{String(model)}}
+            {% end %}
+    )
+    GROUP BY gpu_model, model
+    ORDER BY avg_tps DESC
+    LIMIT 100
+
+TYPE endpoint

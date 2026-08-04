@@ -29,18 +29,22 @@ configured upstream.
 
 | Variable                 | Required | Default | Purpose                              |
 |--------------------------|----------|---------|--------------------------------------|
-| `CLICKHOUSE_URL`         | no       | —       | ClickHouse HTTP endpoint; enables per-request performance sampling and `GET /v1/leaderboard` |
+| `TINYBIRD_APPEND_TOKEN`  | no       | —       | Tinybird `perf_append` token (APPEND scope); enables the managed Tinybird backend |
+| `TINYBIRD_LEADERBOARD_TOKEN` | no   | —       | Tinybird `leaderboard_read` token (READ scope on the `gpu_leaderboard` pipe); required with the append token |
+| `TINYBIRD_HOST`          | no       | `https://api.tinybird.co` | Tinybird API host (switch regions/workspace here) |
+| `CLICKHOUSE_URL`         | no       | —       | ClickHouse HTTP endpoint; enables per-request performance sampling and `GET /v1/leaderboard` (mutually exclusive with the Tinybird tokens) |
 | `CLICKHOUSE_DATABASE`    | no       | `opentela` | Database holding the perf tables |
 | `CLICKHOUSE_USERNAME`    | no       | —       | ClickHouse user (sent as `X-ClickHouse-User`) |
 | `CLICKHOUSE_PASSWORD`    | no       | —       | ClickHouse password (sent as `X-ClickHouse-Key`) |
 | `PERF_FLUSH_INTERVAL`    | no       | `5s`    | Batch flush interval for perf inserts |
-| `PERF_BATCH_SIZE`        | no       | `1024`  | Max rows per ClickHouse insert |
+| `PERF_BATCH_SIZE`        | no       | `1024`  | Max rows per insert |
 | `PERF_QUEUE_SIZE`        | no       | `16384` | Buffered-sample queue; excess samples are dropped and logged |
 | `PERF_PEER_CACHE_TTL`    | no       | `5m`    | TTL for the peer→GPU attribution cache |
 | `LEADERBOARD_CACHE_TTL`  | no       | `1m`    | TTL for cached leaderboard responses |
 
 `INTERNAL_CONTROL_TOKEN` is required when `NODE_CREDENTIAL_SIGNING_KEY` is set.
 `CLICKHOUSE_USERNAME`/`CLICKHOUSE_PASSWORD` require `CLICKHOUSE_URL`.
+`TINYBIRD_APPEND_TOKEN` and `TINYBIRD_LEADERBOARD_TOKEN` must be set together.
 
 ## Run
 
@@ -181,18 +185,18 @@ or `x-api-key` is required. An unknown service returns `200` with an empty
 `data` array. Claude Code does not need this endpoint; set the three
 `ANTHROPIC_DEFAULT_*_MODEL` variables instead.
 
-## GPU performance sampling and leaderboard (optional, ClickHouse)
+## GPU performance sampling and leaderboard (optional, Tinybird or ClickHouse)
 
 Every inference response the mesh routes is stamped with an `X-Computing-Node`
-header naming the serving peer. When `CLICKHOUSE_URL` is set, the streaming
-proxy measures each stamped response — time-to-first-byte, time-to-first-
+header naming the serving peer. When one of the two analytics backends is
+configured, the streaming proxy measures each stamped response — time-to-first-byte, time-to-first-
 content-token, generation duration, and token counts (parsed incrementally
 from the OpenAI and Anthropic SSE frames, or from the JSON body for
 non-streaming replies) — and resolves the peer to its GPU model via the node
 table it already fetches for the catalog.
 
-Samples are batched into `perf_samples` (30-day TTL) and roll up into the
-`perf_hourly` AggregatingMergeTree, which serves the public leaderboard:
+Samples are batched into `perf_samples` (30-day TTL) and aggregated into the
+public leaderboard:
 
 ```bash
 curl "https://api.opentela.ai/v1/leaderboard?hours=168&service=llm"
@@ -227,16 +231,35 @@ served model name — never API keys, prompts, response payloads, or user
 identity. The serving peer is stored only as a truncated SHA-256 fingerprint
 (`peer_fp`) used to count distinct providers.
 
-**Setup**: point the gateway at a ClickHouse HTTP endpoint and apply the DDL
-(idempotent — safe to re-run):
+**Setup — Tinybird Forward (managed, recommended)**: the data project lives in
+[tinybird/](tinybird/) — the raw datasource (`perf_samples`) plus the published
+aggregate endpoint (`gpu_leaderboard.pipe`) with its scoped tokens
+(`perf_append`, `leaderboard_read`). Deploy and wire the tokens:
+
+```bash
+tb deploy --allow-destructive-operations   # first deploy may drop quickstart leftovers
+export TINYBIRD_HOST=https://api.tinybird.co
+tb token ls   # copy the perf_append and leaderboard_read tokens into:
+export TINYBIRD_APPEND_TOKEN=…
+export TINYBIRD_LEADERBOARD_TOKEN=…
+```
+
+The pipe answers the leaderboard straight off raw samples — no rollup table,
+materialized view, or cron — and 30-day TTL lives in the datasource engine.
+
+**Setup — self-managed ClickHouse (alternative)**: point the gateway at a
+ClickHouse HTTP endpoint and apply the DDL (idempotent — safe to re-run):
 
 ```bash
 clickhouse-client --database opentela --multiquery < clickhouse/schema.sql
 ```
 
 Rollups are maintained by the `perf_hourly_mv` materialized view; no cron or
-scheduler is needed. Without `CLICKHOUSE_URL` the pipeline is fully inert: no
-hooks are installed and `/v1/leaderboard` is not mounted.
+scheduler is needed.
+
+Backends are mutually exclusive (`CLICKHOUSE_URL` and `TINYBIRD_APPEND_TOKEN`
+together are rejected at startup). With neither set the pipeline is fully
+inert: no hooks are installed and `/v1/leaderboard` is not mounted.
 
 ## Management and ACL API (optional)
 

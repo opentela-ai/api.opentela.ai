@@ -87,6 +87,7 @@ func (r *Resolver) refresh(ctx context.Context) error {
 		return fmt.Errorf("node table status %d", resp.StatusCode)
 	}
 	var table map[string]struct {
+		ID       string `json:"id"`
 		Hardware struct {
 			GPUs []struct {
 				Name string `json:"name"`
@@ -97,7 +98,14 @@ func (r *Resolver) refresh(ctx context.Context) error {
 		return fmt.Errorf("decoding node table: %w", err)
 	}
 	gpus := make(map[string]GPUInfo, len(table))
-	for id, entry := range table {
+	for key, entry := range table {
+		// DNT keys carry a leading "/" ("/Qm…"); the X-Computing-Node stamp
+		// and each entry's own id field do not. Index under the bare id so
+		// stamps resolve.
+		id := entry.ID
+		if id == "" {
+			id = strings.TrimPrefix(key, "/")
+		}
 		list := entry.Hardware.GPUs
 		info := GPUInfo{Count: len(list)}
 		if len(list) > 0 {

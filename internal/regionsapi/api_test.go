@@ -94,7 +94,7 @@ func TestListRegionsIncludesMembersAndInvitations(t *testing.T) {
 }
 
 func TestPatchMemberPreservesOmittedRoleStatusAndExpiry(t *testing.T) {
-	expiresAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	expiresAt := time.Now().UTC().Add(72 * time.Hour).Truncate(time.Second)
 	pg := &regionStoreStub{
 		members: map[int64][]store.RegionMembership{8: {{
 			InstanceID: 77, RegionID: 8, NodeRole: "head", Status: "active", ExpiresAt: &expiresAt,

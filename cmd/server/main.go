@@ -92,20 +92,32 @@ func run() error {
 	catalogHandler := catalog.NewWithPolicies(cfg.UpstreamURL, catalogCacheTTL, pg)
 
 	// GPU performance pipeline (optional): sample every routed response into
-	// ClickHouse and serve the anonymized aggregate at /v1/leaderboard.
+	// the configured analytics store (Tinybird Forward, or self-managed
+	// ClickHouse) and serve the anonymized aggregate at /v1/leaderboard.
 	var perfHook func(*http.Response) error
 	var leaderboardHandler http.Handler
+	var sink interface {
+		perf.Recorder
+		Run(context.Context)
+	}
+	switch {
+	case cfg.TinybirdAppendToken != "":
+		s := perf.NewTinybirdSink(cfg.TinybirdHost, cfg.TinybirdAppendToken, cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
+		sink, leaderboardHandler = s, leaderboard.New(leaderboard.NewTinybird(cfg.TinybirdHost, cfg.TinybirdLeaderboard), cfg.LeaderboardCacheTTL)
+		log.Printf("GPU performance pipeline enabled (Tinybird %s)", cfg.TinybirdHost.Host)
+	case cfg.ClickHouseURL != nil:
+		s := perf.NewClickHouseSink(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword, cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
+		sink, leaderboardHandler = s, leaderboard.New(leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword), cfg.LeaderboardCacheTTL)
+		log.Printf("GPU performance pipeline enabled (ClickHouse %s, database %s)", cfg.ClickHouseURL.Host, cfg.ClickHouseDatabase)
+	}
 	var sinkDone chan struct{}
-	if cfg.ClickHouseURL != nil {
-		sink := perf.NewClickHouseSink(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword, cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
+	if sink != nil {
 		sinkDone = make(chan struct{})
 		go func() {
 			defer close(sinkDone)
 			sink.Run(ctx)
 		}()
 		perfHook = perf.Hook(sink, perf.NewResolver(cfg.UpstreamURL, cfg.PerfPeerCacheTTL))
-		leaderboardHandler = leaderboard.New(leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword), cfg.LeaderboardCacheTTL)
-		log.Printf("GPU performance pipeline enabled (ClickHouse %s, database %s)", cfg.ClickHouseURL.Host, cfg.ClickHouseDatabase)
 	}
 	handler := server.NewWithControlPlanes(validator, proxy.NewWithPerfHook(cfg.UpstreamURL, perfHook), keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins)
 

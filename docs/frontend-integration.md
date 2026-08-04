@@ -313,7 +313,8 @@ const { generated_at, window_hours, entries } = await res.json();
 
 `hours` defaults to 168 (max 720); `service` and `model` are optional filters.
 Responses are cached server-side (~1 min), so polling at page load is enough.
-When the backend has no ClickHouse configured the endpoint is not mounted and
+When the backend has no analytics store configured (Tinybird Forward or
+ClickHouse) the endpoint is not mounted and
 the request falls through to the proxy plane (`404` without a key) — render the
 section as unavailable rather than showing an error.
 
