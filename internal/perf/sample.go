@@ -28,10 +28,10 @@ type Sample struct {
 	GPUModel      string // normalized GPU name, "" when unresolvable
 	GPUCount      int
 	Status        int
-	ClientAbort   bool // client disconnected before the upstream body ended
-	TTFTMs        float64
+	ClientAbort   bool    // client disconnected before the upstream body ended
+	TTFTMs        float64 // request-write (else header-read) → first body byte
 	FirstTokenMs  float64 // streaming only; 0 when no content token was observed
-	TotalMs       float64
+	TotalMs       float64 // request-write (else header-read) → body end
 	InputTokens   int
 	OutputTokens  int
 	ResponseBytes int64

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -278,6 +279,65 @@ func TestHookSamplesNonStreamingJSON(t *testing.T) {
 	}
 }
 
+// TestHookAnchorsClockAtRequestWrite is the non-streaming latency
+// regression test: the upstream sends headers and body together after a
+// generation delay, so they arrive coalesced. Without Instrument the body is
+// already buffered at ModifyResponse time and TotalMs collapses toward zero;
+// anchored at request-write it must span the delay.
+func TestHookAnchorsClockAtRequestWrite(t *testing.T) {
+	const delay = 150 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(delay) // generation window
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"model":"m","usage":{"prompt_tokens":3,"completion_tokens":9}}`)
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/service/chat/v1/chat/completions", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(Instrument(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Header.Set(PeerHeader, "peer-1") // stamped by the mesh head in production
+
+	rec := &sliceRecorder{}
+	hook := Hook(rec, nil)
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.samples) != 1 {
+		t.Fatalf("samples = %d, want 1", len(rec.samples))
+	}
+	s := rec.samples[0]
+	if s.TotalMs < 100 || s.TTFTMs < 100 {
+		t.Errorf("TotalMs/TTFTMs = %v/%v, want >= ~%v (generation window); clock not anchored at request-write?",
+			s.TotalMs, s.TTFTMs, delay)
+	}
+	if s.OutputTokens != 9 || s.InputTokens != 3 {
+		t.Errorf("tokens = %d/%d", s.InputTokens, s.OutputTokens)
+	}
+}
+
+func TestClockStartFallback(t *testing.T) {
+	fallback := time.Now()
+	if got := clockStart(nil, fallback); !got.Equal(fallback) {
+		t.Error("nil request must fall back")
+	}
+	req := httptest.NewRequest(http.MethodPost, "https://api/x", nil)
+	if got := clockStart(req, fallback); !got.Equal(fallback) {
+		t.Error("uninstrumented request must fall back")
+	}
+	if got := clockStart(Instrument(req), fallback); !got.Equal(fallback) {
+		t.Error("instrumented but unwritten request must fall back")
+	}
+}
+
 func TestHookIgnoresUnstampedOrNonServiceResponses(t *testing.T) {
 	rec := &sliceRecorder{}
 	hook := Hook(rec, nil)
@@ -371,6 +431,8 @@ func TestResolverFetchFailureIsSoft(t *testing.T) {
 // --- sink -------------------------------------------------------------------
 
 func TestSinkBatchesAndFlushes(t *testing.T) {
+	// The handler runs on a server goroutine; bodies needs a guard.
+	var mu sync.Mutex
 	var bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("X-ClickHouse-Key"); got != "secret" {
@@ -383,10 +445,20 @@ func TestSinkBatchesAndFlushes(t *testing.T) {
 			t.Errorf("database = %q", db)
 		}
 		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
 		bodies = append(bodies, string(b))
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
+	firstBody := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(bodies) == 0 {
+			return ""
+		}
+		return bodies[0]
+	}
 	u, _ := url.Parse(srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -397,13 +469,13 @@ func TestSinkBatchesAndFlushes(t *testing.T) {
 
 	sink.Observe(Sample{TS: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Service: "chat", Model: "m", PeerFP: "0123456789abcdef", GPUModel: "Tesla T4", OutputTokens: 5})
 	deadline := time.Now().Add(2 * time.Second)
-	for len(bodies) == 0 && time.Now().Before(deadline) {
+	for firstBody() == "" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(bodies) == 0 {
+	body := firstBody()
+	if body == "" {
 		t.Fatal("no insert happened")
 	}
-	body := bodies[0]
 	for _, want := range []string{`"ts":"2025-01-01 00:00:00.000"`, `"model":"m"`, `"gpu_model":"Tesla T4"`, `"output_tokens":5`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("insert body missing %s: %s", want, body)

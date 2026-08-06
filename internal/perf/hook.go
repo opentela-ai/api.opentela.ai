@@ -52,7 +52,10 @@ func Hook(rec Recorder, gpus *Resolver) func(*http.Response) error {
 			contentType = ""
 		}
 
-		start := time.Now()
+		// Anchor the clock at request-write when the proxy instrumented the
+		// outbound request (see trace.go): for non-streaming responses the
+		// whole generation window sits between request-write and ModifyResponse.
+		start := clockStart(resp.Request, time.Now())
 		resp.Body = wrapBody(resp.Body, contentType, start, func(m *measureBody) {
 			s := base
 			s.Model = m.parser.model

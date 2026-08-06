@@ -74,6 +74,7 @@ func (m *measureBody) finalize() {
 	m.done(m)
 }
 
-// total is measured from upstream response headers (ModifyResponse time) to
-// body end — the full client-visible response latency.
+// total is measured from the clock anchor (request-write when the outbound
+// request was instrumented, else ModifyResponse time) to body end — the
+// client-visible upstream latency, generation included.
 func (m *measureBody) total() time.Duration { return m.now().Sub(m.start) }

@@ -7,6 +7,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 
+	"github.com/opentela-ai/api/internal/perf"
 	"github.com/opentela-ai/api/internal/thinkfix"
 )
 
@@ -41,13 +42,21 @@ func New(target *url.URL) *httputil.ReverseProxy {
 // invoked last in the ModifyResponse chain — after CORS stripping and the
 // thinkfix rewrite — so performance measurement observes the exact stream the
 // client receives. The hook wraps the body in a measuring reader; it must not
-// buffer.
+// buffer. When the hook is installed the outbound request also carries an
+// httptrace (perf.Instrument) anchoring the measurement clock at
+// request-write, so non-streaming latency includes upstream generation.
 func NewWithPerfHook(target *url.URL, perfHook func(*http.Response) error) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		FlushInterval: -1,
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)  // routes to target scheme/host, joins base path, sets Host to target
 			r.SetXForwarded() // sets X-Forwarded-For/Host/Proto
+			if perfHook != nil {
+				// Anchor the perf clock at request-write: otherwise
+				// non-streaming latency vanishes when a worker's
+				// headers and body arrive coalesced (perf.Instrument).
+				r.Out = perf.Instrument(r.Out)
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			for _, h := range corsResponseHeaders {
