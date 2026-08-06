@@ -84,8 +84,12 @@ func (p *streamParser) finish() {
 		return
 	}
 	p.parsed = true
-	if p.kind == parserJSON && len(p.body) > 0 && p.body[len(p.body)-1] == '}' {
-		p.observe(payloadProbe(p.body))
+	// Completeness is judged by the last non-whitespace byte: encoders that
+	// terminate the body with '\n' (e.g. Go's json.Encoder) or pretty-print
+	// would otherwise never be parsed for usage.
+	body := bytes.TrimSpace(p.body)
+	if p.kind == parserJSON && len(body) > 0 && body[len(body)-1] == '}' {
+		p.observe(payloadProbe(body))
 	}
 }
 

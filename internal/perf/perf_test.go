@@ -78,6 +78,15 @@ func TestParserJSONResponse(t *testing.T) {
 	}
 }
 
+func TestParserJSONTrailingNewline(t *testing.T) {
+	// json.Encoder-terminated bodies end with '\n'; usage must still parse.
+	body := `{"model":"qwen3:14b","usage":{"prompt_tokens":7,"completion_tokens":31}}` + "\n"
+	p := parseAll(t, "application/json", body)
+	if p.model != "qwen3:14b" || p.inputTokens != 7 || p.outputTokens != 31 || !p.sawToken {
+		t.Errorf("probe = %+v, want qwen3:14b 7/31 sawToken", p)
+	}
+}
+
 func TestParserUnknownContentTypeIgnored(t *testing.T) {
 	p := parseAll(t, "application/octet-stream", "data: {\"model\":\"x\"}\n\n")
 	if p.model != "" || p.sawToken {
@@ -230,6 +239,42 @@ func TestHookSamplesStampedInferenceResponse(t *testing.T) {
 	}
 	if s.PeerFP == "" || s.PeerFP == "peer-1" || len(s.PeerFP) != 16 {
 		t.Errorf("peer_fp = %q: must be anonymized 16-hex fingerprint", s.PeerFP)
+	}
+}
+
+func TestHookSamplesNonStreamingJSON(t *testing.T) {
+	rec := &sliceRecorder{}
+	hook := Hook(rec, nil)
+	hdr := http.Header{}
+	hdr.Set(PeerHeader, "peer-1")
+	hdr.Set("Content-Type", "application/json")
+	body := `{"model":"claude-sonnet-4-5","usage":{"input_tokens":25,"output_tokens":9}}` + "\n"
+	resp := newResponse("https://api/v1/service/chat/v1/messages", body, "application/json", hdr)
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != body {
+		t.Fatal("measuring wrapper must deliver bytes untouched")
+	}
+	if len(rec.samples) != 1 {
+		t.Fatalf("samples = %d, want 1", len(rec.samples))
+	}
+	s := rec.samples[0]
+	if s.Model != "claude-sonnet-4-5" || s.InputTokens != 25 || s.OutputTokens != 9 {
+		t.Errorf("probe = %q %d/%d", s.Model, s.InputTokens, s.OutputTokens)
+	}
+	if s.FirstTokenMs != 0 {
+		t.Errorf("first_token_ms = %v, want 0 for non-streaming (rollup falls back to total)", s.FirstTokenMs)
+	}
+	if s.TTFTMs == 0 || s.TotalMs == 0 {
+		t.Errorf("timings missing: %+v", s)
+	}
+	if s.ClientAbort {
+		t.Error("clean EOF flagged as abort")
 	}
 }
 

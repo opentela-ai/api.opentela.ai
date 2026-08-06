@@ -229,6 +229,57 @@ func TestMaybeWrapJSONNoMarkerIdentical(t *testing.T) {
 	}
 }
 
+// trackedReadCloser counts Read calls: the JSON path must not touch the
+// upstream body before it is consumed — ModifyResponse runs before the
+// upstream body transfers, and downstream measurement steps time the read.
+type trackedReadCloser struct {
+	*strings.Reader
+	reads int
+}
+
+func (r *trackedReadCloser) Read(p []byte) (int, error) { r.reads++; return r.Reader.Read(p) }
+func (r *trackedReadCloser) Close() error               { return nil }
+
+func TestMaybeWrapJSONBuffersLazily(t *testing.T) {
+	body := `{"id":"msg_1","content":[{"type":"text","text":"plain answer"}]}`
+	resp := mkResp(t, http.MethodPost, "/v1/messages", "application/json", "")
+	tr := &trackedReadCloser{Reader: strings.NewReader(body)}
+	resp.Body = tr
+	if err := MaybeWrapResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if tr.reads != 0 {
+		t.Fatalf("upstream body read %d times inside MaybeWrapResponse; must buffer lazily", tr.reads)
+	}
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != body {
+		t.Fatalf("marker-free JSON must pass through identical, got %s", out)
+	}
+	if tr.reads == 0 {
+		t.Fatal("lazy wrapper never read the upstream body")
+	}
+}
+
+func TestMaybeWrapJSONOverCapPassesThroughUntouched(t *testing.T) {
+	// Bodies beyond MaxJSONRewriteBody are ineligible for rewriting; they
+	// must reach the client complete, not truncated at the cap.
+	big := `{"content":[{"type":"text","text":"` + strings.Repeat("a", MaxJSONRewriteBody+16) + `"}]}`
+	resp := mkResp(t, http.MethodPost, "/v1/messages", "application/json", big)
+	if err := MaybeWrapResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != big {
+		t.Fatalf("over-cap body mangled: got %d bytes, want %d", len(out), len(big))
+	}
+}
+
 func TestMaybeWrapNonOKSkipped(t *testing.T) {
 	resp := mkResp(t, http.MethodPost, "/v1/messages", "application/json", `{"content":[{"type":"text","text":"<|open|>think<|sep|"}]}`)
 	resp.StatusCode = http.StatusInternalServerError

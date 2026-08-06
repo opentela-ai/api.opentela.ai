@@ -1,7 +1,6 @@
 package thinkfix
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"strings"
@@ -41,24 +40,72 @@ func MaybeWrapResponse(resp *http.Response) error {
 		}{NewAnthropicSSERewriter(resp.Body), resp.Body}
 		dropLength(resp)
 	case strings.HasPrefix(ct, "application/json"):
-		body, err := io.ReadAll(io.LimitReader(resp.Body, MaxJSONRewriteBody+1))
-		if err != nil {
-			return nil // pass the drained-remainder stream through untouched
-		}
-		_ = resp.Body.Close()
-		if len(body) > MaxJSONRewriteBody {
-			resp.Body = io.NopCloser(bytes.NewReader(body))
-			dropLength(resp)
-			return nil
-		}
-		if out, changed, err := RewriteAnthropicMessage(body); err == nil && changed {
-			body = out
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
+		// Buffer lazily, on first Read — never inside ModifyResponse. The
+		// upstream body has not transferred yet at this point, and steps
+		// further down the chain wrap the body to time/measure the stream
+		// the client receives; an eager ReadAll would not return until the
+		// worker finished generating, hiding that entire latency.
+		resp.Body = &jsonRewriteBody{rc: resp.Body}
 		dropLength(resp)
 	}
 	return nil
 }
+
+// jsonRewriteBody defers the whole-body buffering a JSON rewrite needs until
+// the body is actually read, then serves the rewritten (or verified
+// marker-free) bytes. Reads past the end of the rewritten buffer for over-cap
+// bodies stream the unread remainder through untouched.
+type jsonRewriteBody struct {
+	rc   io.ReadCloser
+	buf  []byte        // buffered (possibly rewritten) body, once loaded
+	off  int           // read offset into buf
+	rest io.ReadCloser // remainder passthrough for over-cap bodies
+	err  error         // sticky upstream read failure, surfaced after buf
+	done bool
+}
+
+func (w *jsonRewriteBody) load() {
+	if w.done {
+		return
+	}
+	w.done = true
+	body, err := io.ReadAll(io.LimitReader(w.rc, MaxJSONRewriteBody+1))
+	if err != nil {
+		// Broken upstream body: deliver what arrived, then surface the error.
+		w.buf, w.err = body, err
+		_ = w.rc.Close()
+		return
+	}
+	if len(body) > MaxJSONRewriteBody {
+		// Over the rewrite cap: pass through untouched — the lookahead first,
+		// then the remainder straight from the upstream without buffering it.
+		w.buf, w.rest = body, w.rc
+		return
+	}
+	_ = w.rc.Close()
+	if out, changed, rerr := RewriteAnthropicMessage(body); rerr == nil && changed {
+		body = out
+	}
+	w.buf = body
+}
+
+func (w *jsonRewriteBody) Read(p []byte) (int, error) {
+	w.load()
+	if w.off < len(w.buf) {
+		n := copy(p, w.buf[w.off:])
+		w.off += n
+		return n, nil
+	}
+	if w.rest != nil {
+		return w.rest.Read(p)
+	}
+	if w.err != nil {
+		return 0, w.err
+	}
+	return 0, io.EOF
+}
+
+func (w *jsonRewriteBody) Close() error { return w.rc.Close() }
 
 // dropLength invalidates stale framing after a body replacement; the proxy
 // falls back to chunked/close-delimited delivery.
