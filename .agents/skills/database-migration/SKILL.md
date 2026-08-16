@@ -46,8 +46,8 @@ working directory).
 
 ## Deploy notes
 
-- Fly runs `/app/keyctl migrate` as `release_command` before each release
-  (see `fly.toml`), so migrations must be backward-compatible with the
+- Railway runs `/app/keyctl migrate` as `preDeployCommand` before each release
+  (see `railway.json`), so migrations must be backward-compatible with the
   *previous* app version during rolling deploys (additive changes only:
   new nullable columns or columns with defaults, no drops/renames without a
   staged rollout).

@@ -59,7 +59,7 @@ calls will fail** (CORS error or `401`).
    must be allow-listed. A single `CORS_ALLOWED_ORIGINS` allowlist governs both
    planes:
    ```bash
-   flyctl secrets set CORS_ALLOWED_ORIGINS="https://app.opentela.ai" -a opentela-api
+   railway variables --set CORS_ALLOWED_ORIGINS="https://app.opentela.ai"
    # multiple origins: comma-separated, e.g. "https://app.opentela.ai,http://localhost:5173"
    ```
    Setting this triggers a redeploy. With it unset, the API sends no

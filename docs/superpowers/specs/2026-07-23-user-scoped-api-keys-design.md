@@ -220,7 +220,7 @@ existing tests and behavior valid.
 
 ## Deployment note (tracked separately)
 
-The Fly.io deployment (Dockerfile, `fly.toml`, secrets via `flyctl secrets`) is
-independent of this feature and handled as a separate task. Because the
-management plane is opt-in, the current proxy can be deployed first; the Neon
-Auth env vars are added later to light up `/manage/keys`.
+The Railway deployment (Dockerfile, `railway.json`, secrets via Railway
+variables) is independent of this feature and handled as a separate task.
+Because the management plane is opt-in, the current proxy can be deployed
+first; the Neon Auth env vars are added later to light up `/manage/keys`.
