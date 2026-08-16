@@ -1,5 +1,6 @@
-// Package cache provides a concurrency-safe in-memory TTL cache of boolean
-// key-validation results, with a background janitor that evicts expired entries.
+// Package cache provides a concurrency-safe in-memory TTL cache, with a
+// background janitor that evicts expired entries. It is generic over the
+// cached value type; the request path caches API-key validation verdicts.
 package cache
 
 import (
@@ -7,16 +8,17 @@ import (
 	"time"
 )
 
-type entry struct {
-	val       bool
+type entry[T any] struct {
+	val       T
 	expiresAt time.Time
 }
 
-// Cache is a concurrency-safe map of string keys to boolean values with per-entry
-// expiry. Keys are expected to be SHA-256 hex digests, not plaintext tokens.
-type Cache struct {
+// Cache is a concurrency-safe map of string keys to values of type T with
+// per-entry expiry. Keys are expected to be SHA-256 hex digests, not plaintext
+// tokens.
+type Cache[T any] struct {
 	mu   sync.RWMutex
-	data map[string]entry
+	data map[string]entry[T]
 	now  func() time.Time
 
 	stop chan struct{}
@@ -25,11 +27,11 @@ type Cache struct {
 	closeOnce sync.Once
 }
 
-// New creates a Cache. If janitorEvery > 0, a background goroutine evicts expired
-// entries on that interval. Call Close to stop it.
-func New(janitorEvery time.Duration) *Cache {
-	c := &Cache{
-		data: make(map[string]entry),
+// New creates a Cache. If janitorEvery > 0, a background goroutine evicts
+// expired entries on that interval. Call Close to stop it.
+func New[T any](janitorEvery time.Duration) *Cache[T] {
+	c := &Cache[T]{
+		data: make(map[string]entry[T]),
 		now:  time.Now,
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
@@ -44,12 +46,13 @@ func New(janitorEvery time.Duration) *Cache {
 
 // Get returns the cached value and whether a live (non-expired) entry exists.
 // An expired entry is treated as a miss and removed from the map.
-func (c *Cache) Get(key string) (bool, bool) {
+func (c *Cache[T]) Get(key string) (T, bool) {
 	c.mu.RLock()
 	e, ok := c.data[key]
 	c.mu.RUnlock()
 	if !ok {
-		return false, false
+		var zero T
+		return zero, false
 	}
 	if c.now().After(e.expiresAt) {
 		// Expired. Delete under the write lock, but only if the entry is still
@@ -59,34 +62,35 @@ func (c *Cache) Get(key string) (bool, bool) {
 			delete(c.data, key)
 		}
 		c.mu.Unlock()
-		return false, false
+		var zero T
+		return zero, false
 	}
 	return e.val, true
 }
 
 // Set stores val under key with the given time-to-live.
-func (c *Cache) Set(key string, val bool, ttl time.Duration) {
+func (c *Cache[T]) Set(key string, val T, ttl time.Duration) {
 	c.mu.Lock()
-	c.data[key] = entry{val: val, expiresAt: c.now().Add(ttl)}
+	c.data[key] = entry[T]{val: val, expiresAt: c.now().Add(ttl)}
 	c.mu.Unlock()
 }
 
 // Len returns the number of entries currently held (including any not yet swept).
-func (c *Cache) Len() int {
+func (c *Cache[T]) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.data)
 }
 
 // Close stops the janitor goroutine. Safe to call more than once.
-func (c *Cache) Close() {
+func (c *Cache[T]) Close() {
 	c.closeOnce.Do(func() {
 		close(c.stop)
 		<-c.done
 	})
 }
 
-func (c *Cache) janitor(every time.Duration) {
+func (c *Cache[T]) janitor(every time.Duration) {
 	defer close(c.done)
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -100,7 +104,7 @@ func (c *Cache) janitor(every time.Duration) {
 	}
 }
 
-func (c *Cache) deleteExpired() {
+func (c *Cache[T]) deleteExpired() {
 	now := c.now()
 	c.mu.Lock()
 	for k, e := range c.data {

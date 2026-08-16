@@ -129,3 +129,56 @@ func TestDecodeSigningKeyAcceptsSeed(t *testing.T) {
 		t.Fatalf("private key size=%d", len(decoded))
 	}
 }
+
+func TestPricingAudienceIsolation(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	keys := map[string]ed25519.PublicKey{"kid-p": pub}
+	// A pricing-scoped signer stamps the pricing audience.
+	pSigner := NewSignerWithAudience("kid-p", "api.opentela.ai", PricingAudience, priv)
+	aclVerifier := NewVerifier("api.opentela.ai", keys)
+	pricingVerifier := NewVerifierWithAudience("api.opentela.ai", PricingAudience, keys)
+	aclVerifier.now = func() time.Time { return now }
+	pricingVerifier.now = func() time.Time { return now }
+
+	tok, err := pSigner.Sign(Claims{
+		Subject: "peer-seller", Role: "worker", Region: "research-eu",
+		MembershipRevision: 1, JTI: "p1",
+		IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	// The pricing verifier accepts it and reports the pricing audience.
+	got, err := pricingVerifier.Verify(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("pricing Verify: %v", err)
+	}
+	if got.Audience != PricingAudience {
+		t.Fatalf("Audience = %q, want %q", got.Audience, PricingAudience)
+	}
+
+	// The ACL verifier rejects it: a pricing credential must not authorize
+	// ACL access, and an ACL credential must not authorize pricing.
+	if _, err := aclVerifier.Verify(context.Background(), tok); err == nil {
+		t.Fatal("ACL verifier accepted a pricing-scoped token")
+	}
+
+	// The mirror case: an ACL-scoped token is rejected by the pricing verifier.
+	aclSigner := NewSigner("kid-a", "api.opentela.ai", priv)
+	aclTok, err := aclSigner.Sign(Claims{
+		Subject: "peer-seller", Role: "worker", Region: "research-eu",
+		MembershipRevision: 1, JTI: "a1",
+		IssuedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("ACL Sign: %v", err)
+	}
+	if _, err := pricingVerifier.Verify(context.Background(), aclTok); err == nil {
+		t.Fatal("pricing verifier accepted an ACL-scoped token")
+	}
+}

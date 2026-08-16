@@ -4,21 +4,45 @@ import (
 	"context"
 	"net/http"
 	"strings"
+
+	"github.com/opentela-ai/api/internal/account"
 )
 
-// TokenValidator reports whether a plaintext bearer token is valid.
-type TokenValidator interface {
-	Valid(ctx context.Context, token string) (bool, error)
+const bearerPrefix = "bearer "
+
+// Options configures Middleware. The zero value preserves the historical
+// behavior: any valid key passes, and no account identity is required.
+type Options struct {
+	// EnforceAccount rejects active legacy keys — those that carry no owning
+	// account id (api_keys.user_id IS NULL) — with 402 billing_account_required
+	// before they reach a billing-gated route. It is set when BILLING_MODE=enforce.
+	// In observe/off modes a legacy key passes with no account in context, so
+	// the gate never acts on it.
+	EnforceAccount bool
 }
 
-const bearerPrefix = "bearer "
+// TokenValidator reports whether a plaintext bearer token is valid and, when it
+// is, the owning account id. accountID is empty for legacy keys; callers use
+// Options.EnforceAccount to reject them.
+type TokenValidator interface {
+	Valid(ctx context.Context, token string) (accountID string, ok bool, err error)
+}
 
 // Middleware returns net/http middleware that requires a valid API key. The
 // key may arrive as "Authorization: Bearer <key>" (OpenAI style) or as
 // "x-api-key: <key>" (Anthropic style, sent by Claude Code and Anthropic SDK
 // clients). On success it calls next; otherwise it writes 401
-// (missing/malformed/invalid) or 503 (store error).
-func Middleware(v TokenValidator) func(http.Handler) http.Handler {
+// (missing/malformed/invalid), 402 (a valid legacy key while EnforceAccount is
+// on), or 503 (store error).
+//
+// When validation succeeds the owning account id is placed in request context
+// (account.WithID); downstream handlers read it via account.ID. A legacy key
+// carries no account id, so account.ID returns (\"\", false) for it.
+func Middleware(v TokenValidator, opts ...Options) func(http.Handler) http.Handler {
+	var o Options
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token, ok := credential(r)
@@ -26,7 +50,7 @@ func Middleware(v TokenValidator) func(http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			valid, err := v.Valid(r.Context(), token)
+			accountID, valid, err := v.Valid(r.Context(), token)
 			if err != nil {
 				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 				return
@@ -35,7 +59,12 @@ func Middleware(v TokenValidator) func(http.Handler) http.Handler {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
-			next.ServeHTTP(w, r)
+			if o.EnforceAccount && accountID == "" {
+				http.Error(w, "billing_account_required", http.StatusPaymentRequired)
+				return
+			}
+			ctx := account.WithID(r.Context(), accountID)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }

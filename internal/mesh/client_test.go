@@ -153,3 +153,29 @@ func TestLookupPeerAcceptsCurrentAndLegacyCapabilityFields(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupPeerIncludesAdvertisedIdentityGroups(t *testing.T) {
+	wallet, att := signedAttestation(t, "peer-a")
+	client := newClient(t, map[string]peerRecord{
+		"peer-a": {
+			Connected:           true,
+			Owner:               wallet,
+			IdentityAttestation: att,
+			Service: []serviceRecord{{
+				Name:          "llm",
+				IdentityGroup: []string{"model=Qwen/Qwen3-8B", "region=eu"},
+			}},
+		},
+	})
+
+	obs, err := client.LookupPeer(t.Context(), "peer-a")
+	if err != nil {
+		t.Fatalf("LookupPeer: %v", err)
+	}
+	if len(obs.Services) != 1 {
+		t.Fatalf("services=%v, want 1", obs.Services)
+	}
+	if got := obs.Services[0].IdentityGroups; len(got) != 2 || got[0] != "model=Qwen/Qwen3-8B" || got[1] != "region=eu" {
+		t.Fatalf("identity groups=%v, want model+region", got)
+	}
+}

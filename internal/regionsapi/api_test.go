@@ -25,6 +25,7 @@ type regionStoreStub struct {
 	updatedExpiry    *time.Time
 	updatedOwnership *time.Time
 	err              error
+	acceptErr        error
 }
 
 func (s *regionStoreStub) ListRegionsByOwner(context.Context, string) ([]store.RegionInfo, error) {
@@ -37,6 +38,17 @@ func (s *regionStoreStub) ListRegionMembershipsByOwner(_ context.Context, _ stri
 
 func (s *regionStoreStub) GetInstanceByID(context.Context, int64) (store.InstanceInfo, error) {
 	return s.instance, s.err
+}
+
+func (s *regionStoreStub) GetInstanceByIDForUser(context.Context, string, int64) (store.InstanceInfo, error) {
+	return s.instance, s.err
+}
+
+func (s *regionStoreStub) AcceptRegionInvitation(_ context.Context, _ string, _, _ int64, _ string, _ time.Time) (store.RegionMembership, error) {
+	if s.acceptErr != nil {
+		return store.RegionMembership{}, s.acceptErr
+	}
+	return s.updated, nil
 }
 
 func (s *regionStoreStub) UpdateMembershipState(_ context.Context, _ string, _, _ int64, role, status string, expiresAt *time.Time, ownershipVerifiedAt *time.Time) (store.RegionMembership, error) {
@@ -148,4 +160,27 @@ func TestPatchMemberReactivationRequiresFreshMatchingOwnership(t *testing.T) {
 			t.Fatalf("status=%d updated=%q ownership=%v", rec.Code, pg.updatedStatus, pg.updatedOwnership)
 		}
 	})
+}
+
+// TestAcceptInvitationMapsMigrationConflict verifies that a region migration
+// blocked by existing trusted bindings surfaces as a 409 with an actionable
+// message, not an opaque 503.
+func TestAcceptInvitationMapsMigrationConflict(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	pg := &regionStoreStub{
+		instance:  store.InstanceInfo{ID: 77, PeerID: "peer-worker", OwnerWallet: "wallet-owner"},
+		updated:   store.RegionMembership{InstanceID: 77, RegionID: 8},
+		acceptErr: store.ErrRegionMigrationConflict,
+	}
+	svc := New(pg, regionMeshStub{observation: mesh.PeerObservation{PeerID: "peer-worker", Wallet: "wallet-owner", ObservedAt: now.Add(-30 * time.Second)}}, time.Minute)
+	svc.now = func() time.Time { return now }
+	req := httptest.NewRequest(http.MethodPatch, "/manage/regions/8/members/77", strings.NewReader(`{"action":"accept","acceptance_token":"tok"}`))
+	rec := httptest.NewRecorder()
+	svc.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "trusted service bindings") {
+		t.Fatalf("body=%q, want actionable migration message", rec.Body.String())
+	}
 }

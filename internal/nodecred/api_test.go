@@ -14,8 +14,10 @@ import (
 
 type challengeStoreStub struct {
 	challengeStore
-	instance  store.InstanceInfo
-	createErr error
+	instance   store.InstanceInfo
+	createErr  error
+	consume    store.NodeCredentialChallenge
+	consumeErr error
 }
 
 func (s challengeStoreStub) GetInstanceByPeerID(context.Context, string) (store.InstanceInfo, error) {
@@ -24,6 +26,10 @@ func (s challengeStoreStub) GetInstanceByPeerID(context.Context, string) (store.
 
 func (s challengeStoreStub) CreateNodeCredentialChallenge(context.Context, store.NodeCredentialChallenge) error {
 	return s.createErr
+}
+
+func (s challengeStoreStub) ConsumeNodeCredentialChallenge(_ context.Context, _, _, _, _ string, _ time.Time) (store.NodeCredentialChallenge, error) {
+	return s.consume, s.consumeErr
 }
 
 type challengeMeshStub struct {

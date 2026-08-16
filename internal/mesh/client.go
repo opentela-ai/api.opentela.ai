@@ -49,11 +49,13 @@ type peerRecord struct {
 }
 
 type serviceRecord struct {
-	Name string `json:"name"`
+	Name          string   `json:"name"`
+	IdentityGroup []string `json:"identity_group"`
 }
 
 type ServiceObservation struct {
-	Name string
+	Name           string
+	IdentityGroups []string
 }
 
 func New(upstream *url.URL) *Client {
@@ -137,7 +139,10 @@ func observedServices(items []serviceRecord) []ServiceObservation {
 		if item.Name == "" {
 			continue
 		}
-		out = append(out, ServiceObservation{Name: item.Name})
+		out = append(out, ServiceObservation{
+			Name:           item.Name,
+			IdentityGroups: append([]string(nil), item.IdentityGroup...),
+		})
 	}
 	return out
 }

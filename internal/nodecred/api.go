@@ -14,6 +14,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/opentela-ai/api/internal/billing"
 	"github.com/opentela-ai/api/internal/httputil"
 	"github.com/opentela-ai/api/internal/mesh"
 	"github.com/opentela-ai/api/internal/store"
@@ -27,7 +28,7 @@ const (
 type challengeStore interface {
 	GetInstanceByPeerID(ctx context.Context, peerID string) (store.InstanceInfo, error)
 	CreateNodeCredentialChallenge(ctx context.Context, ch store.NodeCredentialChallenge) error
-	ConsumeNodeCredentialChallenge(ctx context.Context, id, peerID, nonce string, now time.Time) (store.NodeCredentialChallenge, error)
+	ConsumeNodeCredentialChallenge(ctx context.Context, id, peerID, nonce, audience string, now time.Time) (store.NodeCredentialChallenge, error)
 }
 
 type challengeMesh interface {
@@ -39,10 +40,21 @@ type Service struct {
 	mesh            challengeMesh
 	signer          *Signer
 	verifier        *Verifier
+	pricingSigner   *Signer
 	ownershipMaxAge time.Duration
 	now             func() time.Time
 	internalDigest  [32]byte
 	internalEnabled bool
+}
+
+// WithPricing equips the service with a pricing-scoped signer
+// (PricingAudience) so it can issue seller-ask credentials via
+// PricingChallengeHandler/PricingIssueHandler. Without it those handlers
+// return 503. The ACL signer/verifier are unaffected.
+func (s *Service) WithPricing(signer *Signer) *Service {
+	cp := *s
+	cp.pricingSigner = signer
+	return &cp
 }
 
 type challengeRequest struct {
@@ -127,12 +139,13 @@ func (s *Service) ChallengeHandler() http.Handler {
 		}
 		issuedAt := now
 		expiresAt := issuedAt.Add(challengeTTL)
-		message := canonicalChallengeMessage(challengeID, inst.PeerID, inst.Membership.RegionSlug, inst.Membership.NodeRole, nonce, issuedAt, expiresAt)
+		message := canonicalChallengeMessage(Audience, challengeID, inst.PeerID, inst.Membership.RegionSlug, inst.Membership.NodeRole, nonce, issuedAt, expiresAt)
 		if err := s.store.CreateNodeCredentialChallenge(r.Context(), store.NodeCredentialChallenge{
 			ID:               challengeID,
 			PeerID:           inst.PeerID,
 			RegionSlug:       inst.Membership.RegionSlug,
 			NodeRole:         inst.Membership.NodeRole,
+			Audience:         Audience,
 			NonceHash:        store.HashKey(nonce),
 			ChallengeMessage: message,
 			IssuedAt:         issuedAt,
@@ -176,7 +189,7 @@ func (s *Service) IssueHandler() http.Handler {
 			return
 		}
 		now := s.now().UTC()
-		challenge, err := s.store.ConsumeNodeCredentialChallenge(r.Context(), req.ChallengeID, req.PeerID, req.Nonce, now)
+		challenge, err := s.store.ConsumeNodeCredentialChallenge(r.Context(), req.ChallengeID, req.PeerID, req.Nonce, Audience, now)
 		if err != nil {
 			switch {
 			case errors.Is(err, store.ErrNotFound):
@@ -237,6 +250,178 @@ func (s *Service) IssueHandler() http.Handler {
 	})
 }
 
+// PricingChallengeHandler issues a pricing-scoped challenge to a billable,
+// payable provider. Unlike the ACL challenge it does NOT require trusted-
+// region membership: the marketplace is for permissionless providers. The
+// peer must still prove it controls the node's owner wallet (via a fresh
+// mesh observation) so a credential cannot be minted for a provider whose
+// ownership has changed.
+func (s *Service) PricingChallengeHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !s.authorized(r.Header.Get("Authorization")) {
+			w.Header().Set("X-Otela-Control-Auth-Failed", "true")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if s.pricingSigner == nil {
+			http.Error(w, "pricing credentials not configured", http.StatusServiceUnavailable)
+			return
+		}
+		var req challengeRequest
+		if err := httputil.DecodeStrict(w, r, 8<<10, &req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		inst, err := s.store.GetInstanceByPeerID(r.Context(), strings.TrimSpace(req.PeerID))
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !billing.BillableProvider(inst.AccountID, inst.OwnerWallet) {
+			// Only a provider that can be charged and paid can publish asks.
+			http.Error(w, "not a billable provider", http.StatusConflict)
+			return
+		}
+		obs, err := s.mesh.LookupPeer(r.Context(), inst.PeerID)
+		if err != nil || !s.observationFresh(obs) || obs.Wallet != inst.OwnerWallet {
+			http.Error(w, "ownership unavailable", http.StatusConflict)
+			return
+		}
+		nonce, err := randomString(24)
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		challengeID, err := randomString(18)
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		issuedAt := s.now().UTC()
+		expiresAt := issuedAt.Add(challengeTTL)
+		message := canonicalChallengeMessage(PricingAudience, challengeID, inst.PeerID, "", "", nonce, issuedAt, expiresAt)
+		if err := s.store.CreateNodeCredentialChallenge(r.Context(), store.NodeCredentialChallenge{
+			ID:               challengeID,
+			PeerID:           inst.PeerID,
+			Audience:         PricingAudience,
+			NonceHash:        store.HashKey(nonce),
+			ChallengeMessage: message,
+			IssuedAt:         issuedAt,
+			ExpiresAt:        expiresAt,
+		}); errors.Is(err, store.ErrConflict) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "too many pending challenges", http.StatusTooManyRequests)
+			return
+		} else if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		httputil.WriteJSON(w, http.StatusCreated, challengeResponse{
+			ChallengeID: challengeID,
+			PeerID:      inst.PeerID,
+			Audience:    PricingAudience,
+			Nonce:       nonce,
+			IssuedAt:    issuedAt,
+			ExpiresAt:   expiresAt,
+			Message:     message,
+		})
+	})
+}
+
+// PricingIssueHandler consumes a pricing-scoped challenge and issues a
+// pricing-scoped credential (Audience = PricingAudience). The credential
+// carries no role/region: the pricing endpoint verifies billable-provider
+// eligibility against the live instance at publication time.
+func (s *Service) PricingIssueHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !s.authorized(r.Header.Get("Authorization")) {
+			w.Header().Set("X-Otela-Control-Auth-Failed", "true")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if s.pricingSigner == nil {
+			http.Error(w, "pricing credentials not configured", http.StatusServiceUnavailable)
+			return
+		}
+		var req issueRequest
+		if err := httputil.DecodeStrict(w, r, 32<<10, &req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		now := s.now().UTC()
+		challenge, err := s.store.ConsumeNodeCredentialChallenge(r.Context(), req.ChallengeID, req.PeerID, req.Nonce, PricingAudience, now)
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				http.Error(w, "not found", http.StatusNotFound)
+			case errors.Is(err, store.ErrChallengeExpired), errors.Is(err, store.ErrChallengeConsumed):
+				http.Error(w, "challenge unavailable", http.StatusConflict)
+			default:
+				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		// Defense in depth: a challenge created for the ACL audience must not
+		// yield a pricing credential even if the store filter were bypassed.
+		if challenge.Audience != PricingAudience {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		pub, sig, err := decodePeerProof(req.PublicKey, req.Signature)
+		if err != nil {
+			http.Error(w, "invalid proof", http.StatusBadRequest)
+			return
+		}
+		derived, err := peer.IDFromPublicKey(pub)
+		if err != nil || derived.String() != req.PeerID {
+			http.Error(w, "invalid proof", http.StatusBadRequest)
+			return
+		}
+		ok, err := pub.Verify([]byte(challenge.ChallengeMessage), sig)
+		if err != nil || !ok {
+			http.Error(w, "invalid proof", http.StatusBadRequest)
+			return
+		}
+		inst, err := s.store.GetInstanceByPeerID(r.Context(), req.PeerID)
+		if err != nil || !billing.BillableProvider(inst.AccountID, inst.OwnerWallet) {
+			http.Error(w, "not a billable provider", http.StatusConflict)
+			return
+		}
+		obs, err := s.mesh.LookupPeer(r.Context(), req.PeerID)
+		if err != nil || !s.observationFresh(obs) || obs.Wallet != inst.OwnerWallet {
+			http.Error(w, "ownership unavailable", http.StatusConflict)
+			return
+		}
+		jti, err := randomString(18)
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		issuedAt := now
+		expiresAt := issuedAt.Add(maxTokenTTL)
+		token, err := s.pricingSigner.Sign(Claims{
+			Subject:   req.PeerID,
+			Audience:  PricingAudience,
+			JTI:       jti,
+			IssuedAt:  issuedAt,
+			ExpiresAt: expiresAt,
+		})
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		httputil.WriteJSON(w, http.StatusCreated, issueResponse{Token: token, ExpiresAt: expiresAt, KID: s.pricingSigner.kid})
+	})
+}
+
 func activeMembership(membership *store.RegionMembership, now time.Time) bool {
 	return membership != nil && membership.Status == "active" && membership.RegionStatus == "active" &&
 		(membership.ExpiresAt == nil || now.Before(membership.ExpiresAt.UTC()))
@@ -266,14 +451,14 @@ func (s *Service) authorized(header string) bool {
 	return subtle.ConstantTimeCompare(s.internalDigest[:], digest[:]) == 1
 }
 
-func canonicalChallengeMessage(challengeID, peerID, region, role, nonce string, issuedAt, expiresAt time.Time) string {
+func canonicalChallengeMessage(audience, challengeID, peerID, region, role, nonce string, issuedAt, expiresAt time.Time) string {
 	return fmt.Sprintf(
 		"opentela-node-credential-challenge\nchallenge_id=%s\npeer_id=%s\nregion=%s\nrole=%s\naudience=%s\nnonce=%s\nissued_at=%s\nexpires_at=%s\n",
 		challengeID,
 		peerID,
 		region,
 		role,
-		Audience,
+		audience,
 		nonce,
 		issuedAt.UTC().Format(time.RFC3339),
 		expiresAt.UTC().Format(time.RFC3339),

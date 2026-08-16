@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opentela-ai/api/internal/httputil"
@@ -21,6 +23,16 @@ import (
 const (
 	maxPeerBatch             = 100
 	controlAuthFailureHeader = "X-Otela-Control-Auth-Failed"
+
+	// bucketSweepInterval is how often allow scans for reapable buckets.
+	bucketSweepInterval = time.Minute
+	// bucketIdleTTL is how long a caller bucket may go unused before it is
+	// reaped. Without eviction the bucket map would grow for the process
+	// lifetime — every distinct caller identity creates an entry, and
+	// permissionless keys accumulate one per issued API key. Reaping only
+	// ever forgives debt, so eviction can make the limiter more lenient
+	// for long-idle callers, never stricter.
+	bucketIdleTTL = 10 * time.Minute
 )
 
 type Service struct {
@@ -31,6 +43,7 @@ type Service struct {
 	identityMaxAge  time.Duration
 	ownershipMaxAge time.Duration
 	cacheTTL        time.Duration
+	evalLimiter     *rateLimiter
 	now             func() time.Time
 }
 
@@ -237,6 +250,21 @@ func (s *Service) HandlerV2() http.Handler {
 				return
 			}
 			claims = &verified
+		}
+		// Per-caller rate limiting. Trusted decisions are never cached, so a
+		// flood of live evaluations from one head can starve the control
+		// plane; throttle by the authenticated caller identity (peer id for
+		// trusted, key hash for permissionless) before doing any DB work.
+		rateKey := req.KeyHash
+		if partition == "trusted_region" && claims != nil {
+			rateKey = "peer:" + claims.Subject
+		}
+		if s.evalLimiter != nil {
+			if ok, retryAfter := s.evalLimiter.allow(rateKey); !ok {
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+				return
+			}
 		}
 		resp, status, err := s.evaluateV2(r.Context(), req, claims)
 		if err != nil {
@@ -561,6 +589,14 @@ func (s *Service) authorizeTrustedRequester(ctx context.Context, peers map[strin
 	if subject.Membership.MembershipRevision != claims.MembershipRevision {
 		return http.StatusServiceUnavailable, errors.New("service unavailable")
 	}
+	// The credential's role must match the DB-authoritative membership
+	// role. A JWT claiming role=head for a worker member is a forged
+	// credential (the membership_revision check above already rules out a
+	// legitimate re-role, since that would bump the revision), so deny it
+	// conclusively rather than trusting the JWT-asserted role below.
+	if claims.Role != subject.Membership.NodeRole {
+		return http.StatusForbidden, errors.New("role mismatch")
+	}
 	obs := observations[claims.Subject]
 	if !s.observationFresh(obs) || obs.Wallet != subject.OwnerWallet {
 		return http.StatusServiceUnavailable, errors.New("service unavailable")
@@ -829,4 +865,78 @@ func dedupePeers(peerIDs []string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// WithEvaluatorRateLimit enables per-caller throttling on the v2 evaluator.
+// A zero or negative rps disables it. Without a limit, trusted decisions
+// (which are never cached client-side) can be driven at unbounded rate by a
+// single authorized head, starving the control plane.
+func (s *Service) WithEvaluatorRateLimit(rps float64, burst int) *Service {
+	s.evalLimiter = newRateLimiter(rps, burst)
+	return s
+}
+
+// rateLimiter is a minimal, dependency-free per-key token bucket. Each caller
+// (a peer id for trusted requests, a key hash for permissionless) gets its own
+// bucket.
+type rateLimiter struct {
+	mu        sync.Mutex
+	rps       float64
+	burst     int
+	now       func() time.Time
+	lastSweep time.Time
+	bkts      map[string]*rlBucket
+}
+
+type rlBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func newRateLimiter(rps float64, burst int) *rateLimiter {
+	if rps <= 0 || burst <= 0 {
+		return nil
+	}
+	return &rateLimiter{rps: rps, burst: burst, now: time.Now, bkts: make(map[string]*rlBucket)}
+}
+
+// allow reports whether the caller may proceed, consuming one token; when
+// it denies, it also returns a Retry-After hint in whole seconds (minimum
+// 1). The first request from a key is granted the full burst. Idle buckets
+// are reaped every bucketSweepInterval once they have been unused for
+// bucketIdleTTL, keeping the per-caller map bounded by active callers.
+func (rl *rateLimiter) allow(key string) (bool, int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := rl.now()
+	if now.Sub(rl.lastSweep) >= bucketSweepInterval {
+		for k, b := range rl.bkts {
+			if now.Sub(b.last) >= bucketIdleTTL {
+				delete(rl.bkts, k)
+			}
+		}
+		rl.lastSweep = now
+	}
+	b, ok := rl.bkts[key]
+	if !ok {
+		b = &rlBucket{tokens: float64(rl.burst), last: now}
+		rl.bkts[key] = b
+	}
+	elapsed := now.Sub(b.last).Seconds()
+	if elapsed > 0 {
+		b.tokens += elapsed * rl.rps
+		if b.tokens > float64(rl.burst) {
+			b.tokens = float64(rl.burst)
+		}
+		b.last = now
+	}
+	if b.tokens < 1 {
+		retry := int(math.Ceil((1 - b.tokens) / rl.rps))
+		if retry < 1 {
+			retry = 1
+		}
+		return false, retry
+	}
+	b.tokens--
+	return true, 0
 }

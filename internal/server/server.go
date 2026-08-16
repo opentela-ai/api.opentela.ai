@@ -38,10 +38,25 @@ func New(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, catalo
 }
 
 func NewWithInternal(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACL http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string) http.Handler {
-	return NewWithControlPlanes(v, proxy, keyMgmt, internalACL, nil, nil, nil, catalog, leaderboard, corsOrigins)
+	return NewWithInternalOpts(v, proxy, keyMgmt, internalACL, catalog, leaderboard, corsOrigins, auth.Options{})
 }
 
-func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string) http.Handler {
+// NewWithInternalOpts is NewWithInternal plus billing options applied to the
+// API-key middleware on every gated route.
+func NewWithInternalOpts(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACL http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options) http.Handler {
+	return NewWithControlPlanes(v, proxy, keyMgmt, internalACL, nil, nil, nil, catalog, leaderboard, corsOrigins, billing)
+}
+
+func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options) http.Handler {
+	return NewWithBilling(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, corsOrigins, billing, nil, nil, nil, nil)
+}
+
+// NewWithBilling is NewWithControlPlanes plus the billing gate (which wraps
+// the inference proxy when non-nil) and the seller-pricing route (POST
+// /internal/pricing, when non-nil). billingGate must already wrap the proxy
+// with the API-key middleware (the gate reads the owning account from
+// context), so callers pass the gate in place of the raw proxy.
+func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -62,6 +77,15 @@ func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt htt
 	if nodeIssue != nil {
 		mux.Handle("/internal/node-credentials", nodeIssue)
 	}
+	if pricing != nil {
+		mux.Handle("/internal/pricing", pricing)
+	}
+	if pricingChallenge != nil {
+		mux.Handle("/internal/pricing/challenges", pricingChallenge)
+	}
+	if pricingIssue != nil {
+		mux.Handle("/internal/pricing/issue", pricingIssue)
+	}
 
 	cors := corsmw.Middleware(corsOrigins)
 	// Permissionless like /v1/services: the leaderboard serves aggregated,
@@ -76,8 +100,16 @@ func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt htt
 		// instead of forwarding to the upstream, which answers "no provider
 		// found" — that route exists for inference, not listing. Like the rest
 		// of the proxy plane it is API-key gated.
-		mux.Handle("GET /v1/service/{service}/v1/models", cors(auth.Middleware(v)(catalog)))
+		mux.Handle("GET /v1/service/{service}/v1/models", cors(auth.Middleware(v, billing)(catalog)))
 	}
-	mux.Handle("/", cors(auth.Middleware(v)(proxy)))
+	// The billing gate (non-nil only when BILLING_MODE != off) wraps the
+	// proxy so it runs on every inference route before forwarding. It is
+	// applied here rather than in the proxy package so the gate has no
+	// dependency on the reverse-proxy internals.
+	forward := proxy
+	if billingGate != nil {
+		forward = billingGate
+	}
+	mux.Handle("/", cors(auth.Middleware(v, billing)(forward)))
 	return mux
 }

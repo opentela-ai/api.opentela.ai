@@ -39,18 +39,26 @@ func (p *Postgres) Migrate(ctx context.Context, ddl string) error {
 	return nil
 }
 
-// Validate reports whether an active key exists for the given hash.
-func (p *Postgres) Validate(ctx context.Context, keyHash string) (bool, error) {
+// Validate reports whether an active key exists for the given hash and, when
+// it does, the owning account id (api_keys.user_id). Legacy keys — created
+// before user ownership — return an empty account id alongside a positive
+// result, which lets the request path reject them with 402 billing_account_required
+// in enforcement mode. Revoked or unknown keys return ("", false, nil).
+func (p *Postgres) Validate(ctx context.Context, keyHash string) (string, bool, error) {
 	var active bool
+	var accountID *string
 	err := p.pool.QueryRow(ctx,
-		`SELECT active FROM api_keys WHERE key_hash = $1`, keyHash).Scan(&active)
+		`SELECT active, user_id FROM api_keys WHERE key_hash = $1`, keyHash).Scan(&active, &accountID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: validate: %w", err)
+		return "", false, fmt.Errorf("store: validate: %w", err)
 	}
-	return active, nil
+	if !active || accountID == nil {
+		return "", active, nil
+	}
+	return *accountID, true, nil
 }
 
 // Insert adds a new active key. name may be empty.

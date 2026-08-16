@@ -255,6 +255,36 @@ func (p *Postgres) AcceptRegionInvitation(ctx context.Context, actorAccountID st
 		return RegionMembership{}, ErrChallengeExpired
 	}
 
+	// Migration guard. The membership table keys on instance_id alone, so an
+	// invitation accepted while the instance is already an active member of a
+	// *different* region would silently move it (ON CONFLICT DO UPDATE). That is
+	// only safe once every trusted service binding tied to the old region has
+	// been removed; otherwise the FK on instance_services(region_id, instance_id)
+	// would dangle and the upsert surfaces as an opaque 503. Reject it here with
+	// a meaningful, 409-mappable error instead.
+	var existingRegionID int64
+	switch err := tx.QueryRow(ctx, `
+			SELECT region_id FROM trusted_region_memberships WHERE instance_id = $1`,
+		instanceID).Scan(&existingRegionID); {
+	case errors.Is(err, pgx.ErrNoRows):
+		// no existing membership — fresh admission, nothing to guard against
+	case err != nil:
+		return RegionMembership{}, fmt.Errorf("store: load existing membership: %w", err)
+	default:
+		if existingRegionID != regionID {
+			var bindings int
+			if err := tx.QueryRow(ctx, `
+					SELECT count(*) FROM instance_services
+					WHERE instance_id = $1 AND region_id = $2 AND exposure = 'trusted_region'`,
+				instanceID, existingRegionID).Scan(&bindings); err != nil {
+				return RegionMembership{}, fmt.Errorf("store: count existing bindings: %w", err)
+			}
+			if bindings > 0 {
+				return RegionMembership{}, ErrRegionMigrationConflict
+			}
+		}
+	}
+
 	var membership RegionMembership
 	err = tx.QueryRow(ctx, `
 		INSERT INTO trusted_region_memberships
@@ -625,9 +655,9 @@ func (p *Postgres) CreateNodeCredentialChallenge(ctx context.Context, ch NodeCre
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO node_credential_challenges
-		    (id, peer_id, region_slug, node_role, nonce_hash, challenge_message, issued_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		ch.ID, ch.PeerID, ch.RegionSlug, ch.NodeRole, ch.NonceHash, ch.ChallengeMessage, ch.IssuedAt.UTC(), ch.ExpiresAt.UTC()); err != nil {
+		    (id, peer_id, region_slug, node_role, audience, nonce_hash, challenge_message, issued_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		ch.ID, ch.PeerID, ch.RegionSlug, ch.NodeRole, audFor(ch.Audience), ch.NonceHash, ch.ChallengeMessage, ch.IssuedAt.UTC(), ch.ExpiresAt.UTC()); err != nil {
 		return fmt.Errorf("store: create node credential challenge: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -636,7 +666,16 @@ func (p *Postgres) CreateNodeCredentialChallenge(ctx context.Context, ch NodeCre
 	return nil
 }
 
-func (p *Postgres) ConsumeNodeCredentialChallenge(ctx context.Context, id, peerID, nonce string, now time.Time) (NodeCredentialChallenge, error) {
+// audFor returns the audience to persist, defaulting to the ACL audience
+// for rows written by callers that have not been updated.
+func audFor(a string) string {
+	if a == "" {
+		return "api.opentela.ai/internal/acl"
+	}
+	return a
+}
+
+func (p *Postgres) ConsumeNodeCredentialChallenge(ctx context.Context, id, peerID, nonce, audience string, now time.Time) (NodeCredentialChallenge, error) {
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return NodeCredentialChallenge{}, fmt.Errorf("store: begin consume node challenge: %w", err)
@@ -645,11 +684,11 @@ func (p *Postgres) ConsumeNodeCredentialChallenge(ctx context.Context, id, peerI
 
 	var out NodeCredentialChallenge
 	err = tx.QueryRow(ctx, `
-		SELECT id, peer_id, region_slug, node_role, nonce_hash, challenge_message, issued_at, expires_at, consumed_at
+		SELECT id, peer_id, region_slug, node_role, audience, nonce_hash, challenge_message, issued_at, expires_at, consumed_at
 		FROM node_credential_challenges
-		WHERE id = $1 AND peer_id = $2
-		FOR UPDATE`, id, peerID).
-		Scan(&out.ID, &out.PeerID, &out.RegionSlug, &out.NodeRole, &out.NonceHash, &out.ChallengeMessage, &out.IssuedAt, &out.ExpiresAt, &out.ConsumedAt)
+		WHERE id = $1 AND peer_id = $2 AND audience = $3
+		FOR UPDATE`, id, peerID, audFor(audience)).
+		Scan(&out.ID, &out.PeerID, &out.RegionSlug, &out.NodeRole, &out.Audience, &out.NonceHash, &out.ChallengeMessage, &out.IssuedAt, &out.ExpiresAt, &out.ConsumedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return NodeCredentialChallenge{}, ErrNotFound
 	}

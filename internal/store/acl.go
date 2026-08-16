@@ -12,12 +12,13 @@ import (
 )
 
 var (
-	ErrNotFound           = errors.New("store: not found")
-	ErrConflict           = errors.New("store: conflict")
-	ErrChallengeExpired   = errors.New("store: challenge expired")
-	ErrChallengeConsumed  = errors.New("store: challenge consumed")
-	ErrWalletInUse        = errors.New("store: wallet in use")
-	ErrWalletOtherAccount = errors.New("store: wallet linked to another account")
+	ErrNotFound                = errors.New("store: not found")
+	ErrConflict                = errors.New("store: conflict")
+	ErrChallengeExpired        = errors.New("store: challenge expired")
+	ErrChallengeConsumed       = errors.New("store: challenge consumed")
+	ErrWalletInUse             = errors.New("store: wallet in use")
+	ErrWalletOtherAccount      = errors.New("store: wallet linked to another account")
+	ErrRegionMigrationConflict = errors.New("store: region migration blocked by existing bindings")
 )
 
 type IdentityInfo struct {
@@ -169,6 +170,7 @@ type NodeCredentialChallenge struct {
 	PeerID           string
 	RegionSlug       string
 	NodeRole         string
+	Audience         string
 	NonceHash        string
 	ChallengeMessage string
 	IssuedAt         time.Time
@@ -326,6 +328,47 @@ func (p *Postgres) LinkWallet(ctx context.Context, accountID, wallet string) (Wa
 		return WalletInfo{}, fmt.Errorf("store: commit link wallet: %w", err)
 	}
 	return out, nil
+}
+
+// AccountForWallet resolves the owning account for a wallet pubkey. The
+// user_wallets.wallet column is UNIQUE (enforced by LinkWallet's
+// ON CONFLICT), so at most one account owns a given wallet. ok is false when
+// the wallet is not linked; the deposit watcher leaves such transfers
+// 'unassigned' for later reconciliation (ReconcileDepositsForWallet).
+func (p *Postgres) AccountForWallet(ctx context.Context, wallet string) (string, bool, error) {
+	if wallet == "" {
+		return "", false, nil
+	}
+	var accountID string
+	err := p.pool.QueryRow(ctx, `SELECT account_id FROM user_wallets WHERE wallet = $1`, wallet).Scan(&accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: account for wallet: %w", err)
+	}
+	return accountID, true, nil
+}
+
+// PrimaryWalletForAccount returns the account's primary linked wallet.
+// ok is false when no primary wallet is linked.
+func (p *Postgres) PrimaryWalletForAccount(ctx context.Context, accountID string) (string, bool, error) {
+	if accountID == "" {
+		return "", false, nil
+	}
+	var wallet string
+	err := p.pool.QueryRow(ctx, `
+		SELECT wallet
+		FROM user_wallets
+		WHERE account_id = $1 AND is_primary = TRUE
+		LIMIT 1`, accountID).Scan(&wallet)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: primary wallet for account: %w", err)
+	}
+	return wallet, true, nil
 }
 
 func (p *Postgres) ListWalletsByUser(ctx context.Context, accountID string) ([]WalletInfo, error) {

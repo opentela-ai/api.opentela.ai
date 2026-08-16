@@ -20,6 +20,8 @@ configured upstream.
 | `IDENTITY_MAX_AGE`       | no       | `720h`  | Max age for email-domain ACL matches |
 | `OWNERSHIP_MAX_AGE`      | no       | `30s`   | Target freshness window for peer ownership checks |
 | `DECISION_CACHE_TTL`     | no       | `30s`   | Suggested TTL returned by the ACL evaluator |
+| `EVALUATOR_RATE_LIMIT_RPS` | no     | `50`    | Per-caller rate for live v2 ACL evaluations (`0` disables the limiter) |
+| `EVALUATOR_RATE_LIMIT_BURST` | no   | `100`   | Per-caller burst allowance for the evaluator rate limiter |
 | `NODE_CREDENTIAL_ISSUER` | no       | `api.opentela.ai` | Issuer for trusted-node JWTs |
 | `NODE_CREDENTIAL_SIGNING_KID` | no* | —       | Active Ed25519 signing-key id |
 | `NODE_CREDENTIAL_SIGNING_KEY` | no* | —       | Base64 Ed25519 seed or private key; enables trusted-node credentials |
@@ -281,6 +283,13 @@ authenticated management request refreshes a server-side identity snapshot
 (`email`, verified flag, normalized domain, and verification time). Email-domain
 ACL rules fail closed when that snapshot becomes older than `IDENTITY_MAX_AGE`.
 
+The Neon Auth project itself is configured to **require email verification**:
+sign-up sends a verification email and unverified users cannot sign in
+(`neon neon-auth config email-password update --require-email-verification
+--send-verification-email-on-sign-up`). The verification method is OTP
+(`otp`), which works with Neon's shared email provider. Verified accounts can
+claim one OTELA grant from the [faucet](#faucet-endpoints).
+
 ### Endpoints
 
 **`POST /manage/keys`** — create a key for the authenticated user.
@@ -350,6 +359,69 @@ Authorization: Bearer <neon-auth-jwt>
 - `DELETE /manage/wallets/{id}` unlinks one of the caller's wallets. It returns
   `409` while that wallet is still the ownership proof for one of the caller's
   claimed instances.
+
+### Faucet endpoints
+
+The OTELA faucet is enabled only when `FAUCET_WALLET_KEYPAIR`, `FAUCET_MINT`,
+and `FAUCET_SOLANA_RPC_URL` are all set. It pays a **one-time** OTELA grant
+to accounts whose Neon Auth JWT carries a verified email claim, sending the
+tokens on-chain to the caller's primary linked wallet's associated token
+account, creating that account first when it does not yet exist. The faucet
+wallet itself must hold OTELA in its own associated token account and enough
+SOL for transaction fees.
+
+The transfer is built and signed entirely with the standard library (no
+`@solana/web3.js` / `@solana/spl-token` dependency): the recipient's
+associated token account address is derived with the same
+`findProgramAddress` semantics as the SPL library (off-curve SHA-256 over
+`[owner, tokenProgram, mint]` + bump, hashed with `ProgramDerivedAddress`
+after the program id), and the transaction is the SPL `transfer`
+instruction, optionally preceded by `createAssociatedTokenAccount`.
+
+- `GET /manage/faucet` reports the caller's faucet state:
+  ```
+  {"enabled": true, "email_verified": true, "mint": "Esmc…",
+   "amount_raw": 1000000000, "amount_ui": "1", "decimals": 9,
+   "claimed": false, "claimed_at": null, "wallet": null, "tx_signature": null}
+  ```
+  `enabled` is `false` when the faucet is not configured on this deployment.
+  `claimed` (and `claimed_at`/`wallet`/`tx_signature`) is populated only for
+  a **completed** claim — a claim whose transaction has been recorded. An
+  in-flight claim therefore reads `claimed:false`, which is why the claim
+  endpoint still returns `409` for a recent in-flight attempt.
+
+- `POST /manage/faucet/claim` performs the payout.
+  - `201 Created` with `{"status":"claimed","wallet","amount_raw",
+    "amount_ui","tx_signature"}` on success.
+  - `403 Forbidden` — the email is not verified.
+  - `409 Conflict` — no wallet is linked, or the account has already claimed
+    (a completed claim, or a pending reservation that is still in flight).
+  - `503 Service Unavailable` — the on-chain transfer failed (the pending
+    reservation is rolled back so the account may retry), or the transaction
+    landed but could not be recorded (returned for manual reconciliation).
+  - `404 Not Found` — the faucet is disabled.
+
+#### Claim lifecycle and race safety
+
+A claim is a three-phase operation, with the `faucet_claims` table's
+`PRIMARY KEY (account_id)` providing the race-safety invariant:
+
+1. **Reserve.** Insert a row with `tx_signature = ''` ("pending"). The unique
+   constraint means only one concurrent request per account reaches the
+   on-chain send — a second attempt is rejected with `409`.
+2. **Send.** Broadcast the SPL `transfer`. On failure the pending row is
+   deleted (`ClearFaucetClaim`) so the account can retry immediately.
+3. **Complete.** `UPDATE … SET tx_signature = $sig WHERE tx_signature = ''`
+   records the on-chain signature. A completed claim is never overwritten,
+   so a late-arriving retry from a crashed request cannot clobber it.
+
+If the server crashes between phases 2 and 3, a pending row lingers and
+blocks retries. `ClaimFaucet` will take it over again only once it is older
+than `FaucetPendingTTL` (2 minutes) — past the Solana mainnet blockhash
+validity window (~60s) and the API's 60s send timeout, so the original
+transaction, if any, can no longer confirm. The edge case this leaves: a
+process that crashed *after* a successful send but *before* completing the
+row, retried after 2 minutes, can double-pay by at most one extra grant.
 
 ### Instance and ACL endpoints
 
@@ -460,11 +532,20 @@ membership revision, and fresh ownership.
 | `NODE_CREDENTIAL_SIGNING_KID` | no*     | —       | Active Ed25519 signing key id                     |
 | `NODE_CREDENTIAL_SIGNING_KEY` | no*     | —       | Base64 Ed25519 seed/private key                    |
 | `NODE_CREDENTIAL_VERIFY_KEYS` | no      | —       | Comma-separated verification keys for overlap     |
+| `FAUCET_SOLANA_RPC_URL`       | no*     | —       | Solana JSON-RPC endpoint used for faucet payouts  |
+| `FAUCET_MINT`                 | no*     | —       | OTELA SPL token mint address                      |
+| `FAUCET_TOKEN_PROGRAM`        | no      | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | SPL Token or Token-2022 program id |
+| `FAUCET_WALLET_KEYPAIR`       | no*     | —       | Base64 Ed25519 seed/private key of the funded faucet wallet |
+| `FAUCET_AMOUNT`               | no      | `1000000000` | Per-claim payout in token base units (1 OTELA @ 9 decimals) |
+| `FAUCET_DECIMALS`             | no      | `9`      | Token decimals, used for display and JSON output  |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.
 `NODE_CREDENTIAL_SIGNING_KID` and `INTERNAL_CONTROL_TOKEN` are required when
-`NODE_CREDENTIAL_SIGNING_KEY` is configured.
+`NODE_CREDENTIAL_SIGNING_KEY` is configured. The faucet requires
+`FAUCET_WALLET_KEYPAIR`, `FAUCET_MINT`, and `FAUCET_SOLANA_RPC_URL` together —
+setting any one without the others is a config error. The faucet wallet must
+hold OTELA in its associated token account (plus SOL for fees) to pay out.
 
 ## Test
 

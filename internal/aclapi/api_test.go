@@ -601,3 +601,158 @@ func TestEvaluateUnmanagedPeersDoNotDependOnMeshLookup(t *testing.T) {
 		t.Fatalf("mesh calls=%d, want 0 for unmanaged peers", mesh.calls)
 	}
 }
+
+// TestEvaluateV2TrustedRejectsRoleMismatch verifies the DB-authoritative
+// requester-role check (Fix #2): a node credential that asserts a role
+// different from the membership's NodeRole is forged, regardless of any
+// other matching field. The membership_revision check already rules out a
+// legitimate re-role (that bumps the revision), so a mismatch here is
+// conclusive and must be denied with 403, not trusted.
+func TestEvaluateV2TrustedRejectsRoleMismatch(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	// JWT claims head, but the DB says this peer is a worker.
+	claims := nodecred.Claims{Subject: "peer-a", Role: "head", Region: "research-eu", MembershipRevision: 4}
+	store := &storeStub{
+		key: store.ActiveKey{KeyID: 14},
+		managed: []store.InstanceInfo{
+			{
+				PeerID:      "peer-a",
+				OwnerWallet: "wallet-a",
+				PolicyScope: store.PolicyScopePeer,
+				Membership:  &store.RegionMembership{RegionSlug: "research-eu", RegionStatus: "active", Status: "active", NodeRole: "worker", MembershipRevision: 4},
+			},
+		},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "wallet-a", ObservedAt: now.Add(-30 * time.Second)},
+	}}
+	svc := NewWithNodeVerifier(store, mesh, "internal-secret-token", nodeVerifierStub{claims: claims}, time.Hour, time.Minute, 30*time.Second)
+	svc.now = func() time.Time { return now }
+
+	_, status, err := svc.evaluateV2(context.Background(), evaluateV2Request{
+		KeyHash:   strings.Repeat("a", 64),
+		Partition: "trusted_region",
+		Region:    "research-eu",
+		RouteKind: "worker",
+		Service:   "llm-private",
+		PeerIDs:   []string{"peer-a"},
+	}, &claims)
+	if err == nil {
+		t.Fatalf("expected error for role mismatch, got nil")
+	}
+	if status != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403 (role mismatch)", status)
+	}
+}
+
+// TestEvaluatorRateLimitThrottlesByCaller verifies the per-caller token
+// bucket on the v2 evaluator (Fix #3). A trusted caller driving live
+// (uncached) evaluations above its configured burst must receive 429s
+// rather than starving the control plane.
+func TestEvaluatorRateLimitThrottlesByCaller(t *testing.T) {
+	store := &storeStub{key: store.ActiveKey{KeyID: 1}}
+	mesh := &meshStub{}
+	svc := NewWithNodeVerifier(store, mesh, "internal-secret-token", nil, time.Hour, time.Minute, 30*time.Second)
+	svc = svc.WithEvaluatorRateLimit(1, 2) // 1 rps, burst 2
+
+	allowed := 0
+	throttled := 0
+	for i := 0; i < 20; i++ {
+		rec := httptest.NewRecorder()
+		body := `{"key_hash":"` + strings.Repeat("a", 64) + `","partition":"permissionless","route_kind":"service_ingress","service":"svc","peer_ids":["peer-x"]}`
+		req := httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate-v2", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer internal-secret-token")
+		svc.HandlerV2().ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusOK:
+			allowed++
+		case http.StatusTooManyRequests:
+			if rec.Header().Get("Retry-After") == "" {
+				t.Fatalf("request %d: 429 response missing Retry-After header", i)
+			}
+			throttled++
+		default:
+			t.Fatalf("unexpected status=%d for request %d: %s", rec.Code, i, rec.Body.String())
+		}
+	}
+	if allowed == 0 {
+		t.Fatalf("all requests throttled; expected at least the burst")
+	}
+	if throttled == 0 {
+		t.Fatalf("no requests throttled over burst+1; rate limit not applied (allowed=%d)", allowed)
+	}
+}
+
+// TestEvaluatorRateLimitKeyedByCaller ensures permissionless and trusted
+// callers get independent buckets (a flooded permissionless caller must not
+// starve a trusted peer).
+func TestEvaluatorRateLimitKeyedByCaller(t *testing.T) {
+	store := &storeStub{key: store.ActiveKey{KeyID: 1}}
+	mesh := &meshStub{}
+	claims := nodecred.Claims{Subject: "peer-trusted", Role: "worker", Region: "research-eu", MembershipRevision: 4}
+	svc := NewWithNodeVerifier(store, mesh, "internal-secret-token", nodeVerifierStub{claims: claims}, time.Hour, time.Minute, 30*time.Second)
+	svc = svc.WithEvaluatorRateLimit(1, 1) // 1 rps, burst 1
+
+	// Exhaust the permissionless caller's bucket.
+	permBody := `{"key_hash":"` + strings.Repeat("a", 64) + `","partition":"permissionless","route_kind":"service_ingress","service":"svc","peer_ids":["peer-x"]}`
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate-v2", strings.NewReader(permBody))
+		req.Header.Set("Authorization", "Bearer internal-secret-token")
+		svc.HandlerV2().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("perm request %d status=%d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A trusted caller should still get its own bucket, so the first
+	// request must not be a 429 caused by the permissionless flood.
+	// upstream_peer_id is required for route_kind=worker; without it the
+	// request is rejected during validation (400) before reaching the
+	// limiter, which would make the throttling assertions below vacuous.
+	trustedBody := `{"key_hash":"` + strings.Repeat("b", 64) + `","partition":"trusted_region","region":"research-eu","route_kind":"worker","service":"svc","peer_ids":["peer-trusted"],"upstream_peer_id":"peer-head"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate-v2", strings.NewReader(trustedBody))
+	req.Header.Set("Authorization", "Bearer trusted-token")
+	svc.HandlerV2().ServeHTTP(rec, req)
+	if rec.Code == http.StatusTooManyRequests {
+		t.Fatalf("trusted caller throttled by permissionless flood; buckets are not independent (status=%d)", rec.Code)
+	}
+
+	// The trusted bucket must also be live: an immediate second request
+	// exceeds the burst of 1 and is throttled, proving the limiter is
+	// genuinely applied per caller and the previous assertion was not
+	// vacuously satisfied by a disabled limiter.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/internal/acl/evaluate-v2", strings.NewReader(trustedBody))
+	req.Header.Set("Authorization", "Bearer trusted-token")
+	svc.HandlerV2().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second trusted request status=%d, want 429 (bucket live and independent)", rec.Code)
+	}
+}
+
+// TestRateLimiterEvictsIdleBuckets ensures per-caller buckets cannot grow
+// without bound: a caller idle longer than bucketIdleTTL is reaped on the
+// next sweep, so a stream of one-shot identities (every issued API key hash
+// creates a bucket) cannot leak memory for the process lifetime.
+func TestRateLimiterEvictsIdleBuckets(t *testing.T) {
+	rl := newRateLimiter(1, 1)
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	rl.now = func() time.Time { return now }
+
+	if ok, _ := rl.allow("stale-caller"); !ok {
+		t.Fatalf("first allow unexpectedly denied")
+	}
+	// Advance past the idle TTL; the next allow triggers a sweep.
+	now = now.Add(bucketIdleTTL + bucketSweepInterval + time.Second)
+	if ok, _ := rl.allow("fresh-caller"); !ok {
+		t.Fatalf("allow for fresh caller unexpectedly denied")
+	}
+	if _, ok := rl.bkts["stale-caller"]; ok {
+		t.Fatalf("idle bucket not evicted after %v", bucketIdleTTL)
+	}
+	if _, ok := rl.bkts["fresh-caller"]; !ok {
+		t.Fatalf("active bucket wrongly evicted")
+	}
+}

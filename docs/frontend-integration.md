@@ -318,6 +318,82 @@ ClickHouse) the endpoint is not mounted and
 the request falls through to the proxy plane (`404` without a key) — render the
 section as unavailable rather than showing an error.
 
+## Step 9 (optional) — Claim the OTELA faucet
+
+Verified accounts can claim a **one-time** OTELA grant, paid on-chain to the
+associated token account of their primary linked wallet (created first when
+it does not yet exist). The faucet is only mounted when the operator has set
+`FAUCET_WALLET_KEYPAIR`, `FAUCET_MINT`, and `FAUCET_SOLANA_RPC_URL`; when it is
+not configured, `GET /manage/faucet` reports `{"enabled":false}` and
+`POST /manage/faucet/claim` returns `404`.
+
+Poll the status endpoint rather than assuming eligibility — it derives
+`email_verified` from the JWT, so it doubles as an authoritative "is this
+account verified?" check:
+
+```js
+async function faucetStatus(jwt) {
+  const res = await fetch(`${API_BASE}/manage/faucet`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+  });
+  if (!res.ok) throw new Error(`Faucet status failed: ${res.status}`);
+  return res.json();
+  // {enabled, email_verified, mint, amount_raw, amount_ui, decimals,
+  //  claimed, claimed_at, wallet, tx_signature}
+}
+```
+
+Render the claim button only when `enabled && email_verified && !claimed &&
+linkedWallets.length > 0`. `claimed` (with `claimed_at`/`wallet`/
+`tx_signature`) is populated **only** for a completed claim — a claim whose
+transaction has been recorded — so during a brief in-flight attempt the
+status still reads `claimed:false`. The claim endpoint still rejects that
+account with `409`, so the button should be disabled or hidden on a non-2xx
+response rather than on status alone.
+
+```js
+async function claimFaucet(jwt) {
+  const res = await fetch(`${API_BASE}/manage/faucet/claim`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${jwt}` },
+  });
+  if (res.status === 403) throw new Error("Verify your email first");
+  if (res.status === 404) throw new Error("Faucet is not enabled here");
+  if (res.status === 409) throw new Error("Link a wallet, or already claimed");
+  if (res.status === 503) throw new Error("Payout failed — retry shortly");
+  if (!res.ok) throw new Error(`Claim failed: ${res.status}`);
+  return res.json();
+  // {status:"claimed", wallet, amount_raw, amount_ui, tx_signature}
+}
+```
+
+The `tx_signature` is a Solana transaction id — link it to the cluster's
+explorer (e.g. `https://solscan.io/tx/<sig>` for mainnet-beta). After a
+successful claim, refetch both the faucet status and the recipient wallet's
+balance: the payout lands in the *linked* wallet's associated token account,
+which may differ from the browser-connected wallet, so refresh by the
+`wallet` from the claim response rather than the connected one.
+
+### How the claim is made race-safe
+
+A claim is a three-phase operation, with the `faucet_claims` table's
+`PRIMARY KEY (account_id)` providing the invariant:
+
+1. **Reserve** — insert a row with `tx_signature = ""` (pending). The unique
+   key means only one concurrent request per account reaches the on-chain
+   send; a second attempt is rejected with `409`.
+2. **Send** — broadcast the SPL `transfer`. On failure the pending row is
+   deleted so the account can retry immediately.
+3. **Complete** — `UPDATE … SET tx_signature = $sig` records the result. A
+   completed claim is never overwritten, so a late retry from a crashed
+   request cannot clobber it.
+
+If the server crashes between phases 2 and 3, a pending row lingers and
+blocks retries until it is 2 minutes old (past the Solana blockhash validity
+window and the send timeout), after which the next claim takes it over. The
+residual edge case — a crash *after* a successful send but *before* the row
+is completed, retried after 2 min — can double-pay by at most one extra grant.
+
 ---
 
 ## Endpoint reference
@@ -330,6 +406,8 @@ Base URL: `https://api.opentela.ai`. All `/manage/keys*` calls require
 | `POST` | `/manage/keys` | `{"name":"…"}` (optional) | `201` `{id,key,prefix,name,created_at}` | `401` `409` (cap) `400` (bad body) `503` |
 | `GET` | `/manage/keys` | — | `200` `[{id,name,prefix,created_at,revoked_at}]` | `401` `503` |
 | `DELETE` | `/manage/keys/{id}` | — | `204` | `401` `404` (not owner/unknown) `400` (bad id) |
+| `GET` | `/manage/faucet` | — | `200` `{enabled,email_verified,mint,amount_raw,amount_ui,decimals,claimed,claimed_at?,wallet?,tx_signature?}` | `401` |
+| `POST` | `/manage/faucet/claim` | — | `201` `{status,wallet,amount_raw,amount_ui,tx_signature}` | `401` `403` (unverified) `404` (disabled) `409` (no wallet/already claimed) `503` (send failed) |
 | `OPTIONS` | `/manage/keys` | — | `204` (CORS preflight) | — |
 
 CORS applies to **both** planes — the `/manage/` management plane and the `/v1/*`
@@ -352,6 +430,17 @@ auth, so it never needs a token.
   the JWT — it's short-lived and re-issued cheaply while the session is valid.
 - **Per-user cap.** Default 10 active keys per user (`409` when exceeded);
   revoking frees a slot. Configurable via `MAX_KEYS_PER_USER` on the backend.
+- **Email must be verified to use the faucet.** The Neon Auth project is
+  configured to require verification (`--require-email-verification
+  --send-verification-email-on-sign-up`); `GET /manage/faucet` surfaces this as
+  `email_verified`, and `POST /manage/faucet/claim` returns `403` for
+  unverified accounts. A verified account can claim exactly once; the
+  `faucet_claims` table keys on `account_id`, so concurrent claims can't
+  double-pay.
+- **The faucet pays the *linked* wallet, not the connected one.** The
+  on-chain transfer goes to the associated token account of the account's
+  primary linked wallet (server-side). Refresh balances by the `wallet` in
+  the claim response — it may differ from the browser-connected wallet.
 - **Don't send the JWT to `/v1/…`, and don't send `sk-…` to `/manage/…`.** They
   are validated by different mechanisms on different paths.
 

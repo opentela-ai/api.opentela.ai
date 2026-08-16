@@ -105,7 +105,15 @@ func (w *jsonRewriteBody) Read(p []byte) (int, error) {
 	return 0, io.EOF
 }
 
-func (w *jsonRewriteBody) Close() error { return w.rc.Close() }
+// Close releases the upstream body. load already closes it on the rewritten
+// and truncated-read paths, so Close only acts when the body was never read
+// or is still streaming through as an over-cap remainder.
+func (w *jsonRewriteBody) Close() error {
+	if w.done && w.rest == nil {
+		return nil
+	}
+	return w.rc.Close()
+}
 
 // dropLength invalidates stale framing after a body replacement; the proxy
 // falls back to chunked/close-delimited delivery.

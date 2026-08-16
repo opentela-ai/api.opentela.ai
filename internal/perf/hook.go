@@ -14,6 +14,24 @@ const PeerHeader = "X-Computing-Node"
 
 const routePrefix = "/v1/service/"
 
+// SettleUsage is the parsed token accounting handed to a settlement
+// callback at body end, after the perf sample is observed. Unlike Sample it
+// carries the RAW served peer id (from X-Computing-Node) so billing can
+// resolve it against the immutable quote snapshot — perf itself never
+// persists raw peer ids.
+type SettleUsage struct {
+	Service           string
+	Route             string
+	Model             string
+	ServedPeerID      string // raw X-Computing-Node, "" when the mesh didn't stamp one
+	Status            int
+	ClientAbort       bool
+	InputTokens       int // billable regular input after dialect normalization
+	CachedInputTokens int
+	OutputTokens      int
+	Complete          bool // usage had a final, authoritative token count
+}
+
 // Hook returns a reverse-proxy ModifyResponse step that swaps the response
 // body for a measuring wrapper and queues a Sample when the body ends. Only
 // responses stamped by the mesh (X-Computing-Node) on inference service
@@ -24,6 +42,16 @@ const routePrefix = "/v1/service/"
 // measurements reflect the stream the client actually receives. Streams are
 // never buffered; per-request cost is bounded by the parser's line buffer.
 func Hook(rec Recorder, gpus *Resolver) func(*http.Response) error {
+	return HookWithSettle(rec, gpus, nil)
+}
+
+// HookWithSettle is Hook plus an optional settlement callback invoked at body
+// end, after the perf Sample is observed, with the same parser state — no
+// second parse. settle may be nil; when non-nil it runs even for non-2xx,
+// aborted, or usage-less responses so the caller can release the reservation.
+// The perf package does not depend on billing: the caller converts SettleUsage
+// into its own settlement types.
+func HookWithSettle(rec Recorder, gpus *Resolver, settle func(resp *http.Response, u SettleUsage)) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		peerID := resp.Header.Get(PeerHeader)
 		service, route := splitServiceRoute(requestPath(resp))
@@ -66,9 +94,27 @@ func Hook(rec Recorder, gpus *Resolver) func(*http.Response) error {
 			}
 			s.TotalMs = durationMs(m.total())
 			s.InputTokens = m.parser.inputTokens
+			s.CachedInputTokens = m.parser.cachedInputTokens
 			s.OutputTokens = m.parser.outputTokens
 			s.ResponseBytes = m.bytes
 			rec.Observe(s)
+			if settle != nil {
+				settle(resp, SettleUsage{
+					Service:           s.Service,
+					Route:             s.Route,
+					Model:             s.Model,
+					ServedPeerID:      peerID,
+					Status:            s.Status,
+					ClientAbort:       s.ClientAbort,
+					InputTokens:       m.parser.settleInputTokens(),
+					CachedInputTokens: s.CachedInputTokens,
+					OutputTokens:      s.OutputTokens,
+					// A usage record is complete when the response carried final
+					// token counts (2xx with usage), not an abort or empty parse.
+					Complete: s.Status >= 200 && s.Status < 300 &&
+						!s.ClientAbort && (s.InputTokens > 0 || s.CachedInputTokens > 0 || s.OutputTokens > 0),
+				})
+			}
 		})
 		return nil
 	}

@@ -2,9 +2,13 @@ package config
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/opentela-ai/api/internal/solana"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -12,6 +16,7 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/db")
 	// Ensure optional vars are unset so defaults apply.
 	t.Setenv("LISTEN_ADDR", "")
+	t.Setenv("PORT", "")
 	t.Setenv("CACHE_TTL", "")
 	t.Setenv("CACHE_NEGATIVE_TTL", "")
 	t.Setenv("CACHE_JANITOR_INTERVAL", "")
@@ -52,6 +57,22 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.CacheTTL != time.Hour {
 		t.Errorf("CacheTTL = %v, want 1h", cfg.CacheTTL)
+	}
+}
+
+// Railway injects PORT and routes the public domain to it; when set it must win
+// over the static LISTEN_ADDR default so the listener matches where Railway
+// sends traffic.
+func TestLoadHonorsPort(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("PORT", "7142")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ListenAddr != ":7142" {
+		t.Errorf("ListenAddr = %q, want :7142", cfg.ListenAddr)
 	}
 }
 
@@ -321,5 +342,230 @@ func TestLoadRejectsTinybirdAndClickHouseTogether(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() succeeded with both ClickHouse and Tinybird backends")
+	}
+}
+
+func TestLoadBillingModeDefaultAndValid(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	// Default is off.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingMode != BillingOff {
+		t.Fatalf("BillingMode = %q, want off", cfg.BillingMode)
+	}
+	// enforce is accepted now that settlement (Step 4) is wired; only
+	// off, observe, and enforce are valid.
+	for _, m := range []string{"off", "observe", "enforce"} {
+		t.Setenv("BILLING_MODE", m)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("BILLING_MODE=%s: %v", m, err)
+		}
+		if string(cfg.BillingMode) != m {
+			t.Fatalf("BillingMode = %q, want %s", cfg.BillingMode, m)
+		}
+	}
+	t.Setenv("BILLING_MODE", "observe")
+	if cfg, _ := Load(); cfg.BillingMode == BillingEnforce {
+		t.Fatal("observe must not equal enforce")
+	}
+}
+
+func TestLoadBillingEnforceAccepted(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_MODE", "enforce")
+	t.Setenv("BILLING_FEE_BPS", "250")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("enforce should be accepted now that settlement is wired: %v", err)
+	}
+	if cfg.BillingMode != BillingEnforce {
+		t.Fatalf("BillingMode = %q, want enforce", cfg.BillingMode)
+	}
+	if cfg.BillingFeeBps != 250 {
+		t.Fatalf("BillingFeeBps = %d, want 250", cfg.BillingFeeBps)
+	}
+	if cfg.BillingSweepInterval <= 0 || cfg.BillingSweepAge <= 0 {
+		t.Fatalf("sweep config not set: interval=%v age=%v", cfg.BillingSweepInterval, cfg.BillingSweepAge)
+	}
+}
+
+func TestLoadBillingModeInvalid(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_MODE", "collect")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() expected error for invalid BILLING_MODE")
+	}
+}
+
+func TestLoadBillingOutputMax(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_OUTPUT_TOKEN_MAX", "8192")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingOutputMax != 8192 {
+		t.Fatalf("BillingOutputMax = %d, want 8192", cfg.BillingOutputMax)
+	}
+}
+
+func TestLoadDepositConfig(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	t.Setenv("BILLING_SOLANA_RPC_URL", "https://rpc.example")
+	t.Setenv("BILLING_DEPOSIT_MINT", "So11111111111111111111111111111111111111112")
+	t.Setenv("BILLING_DEPOSIT_POLL_INTERVAL", "45s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingTreasuryWallet != "11111111111111111111111111111112" {
+		t.Fatalf("treasury = %q", cfg.BillingTreasuryWallet)
+	}
+	if cfg.BillingSolanaRPC != "https://rpc.example" {
+		t.Fatalf("rpc = %q", cfg.BillingSolanaRPC)
+	}
+	if cfg.BillingDepositMint != "So11111111111111111111111111111111111111112" {
+		t.Fatalf("mint = %q", cfg.BillingDepositMint)
+	}
+	if cfg.BillingDepositPollInterval != 45*time.Second {
+		t.Fatalf("poll = %v, want 45s", cfg.BillingDepositPollInterval)
+	}
+}
+
+func TestLoadDepositConfigDefaultsToFaucetRPC(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	t.Setenv("FAUCET_SOLANA_RPC_URL", "https://faucet.rpc")
+	t.Setenv("FAUCET_MINT", "MintBase58")
+	t.Setenv("FAUCET_WALLET_KEYPAIR", strings.Repeat("A", 86)+"==") // 64-byte (structurally valid) key
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingSolanaRPC != "https://faucet.rpc" {
+		t.Fatalf("rpc should default to faucet: %q", cfg.BillingSolanaRPC)
+	}
+	if cfg.BillingDepositMint != "MintBase58" {
+		t.Fatalf("mint should default to faucet: %q", cfg.BillingDepositMint)
+	}
+}
+
+func TestLoadDepositConfigMissingRPC(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	// Neither BILLING_SOLANA_RPC_URL nor FAUCET_SOLANA_RPC_URL set.
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BILLING_SOLANA_RPC_URL") {
+		t.Fatalf("err = %v, want mention of BILLING_SOLANA_RPC_URL", err)
+	}
+}
+
+func TestLoadDepositConfigMissingMint(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	t.Setenv("BILLING_SOLANA_RPC_URL", "https://rpc.example")
+	// Neither BILLING_DEPOSIT_MINT nor FAUCET_MINT set.
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BILLING_DEPOSIT_MINT") {
+		t.Fatalf("err = %v, want mention of BILLING_DEPOSIT_MINT", err)
+	}
+}
+
+func TestLoadDepositConfigOffWhenNoTreasury(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	// No BILLING_TREASURY_WALLET: even without RPC/mint, Load must succeed.
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingTreasuryWallet != "" {
+		t.Fatalf("treasury should be empty, got %q", cfg.BillingTreasuryWallet)
+	}
+}
+
+// genTreasury builds a real ed25519 keypair and returns the base64 keypair
+// env value plus the matching base58 wallet pubkey, so the withdrawal config
+// tests can exercise the on-boot verification.
+func genTreasury(t *testing.T) (keypairB64, walletB58 string) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(priv), solana.EncodeBase58(pub)
+}
+
+func TestLoadWithdrawalKeypairVerified(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	keypairB64, walletB58 := genTreasury(t)
+	t.Setenv("BILLING_TREASURY_WALLET", walletB58)
+	t.Setenv("BILLING_SOLANA_RPC_URL", "https://rpc.example")
+	t.Setenv("BILLING_DEPOSIT_MINT", "So11111111111111111111111111111111111111112")
+	t.Setenv("BILLING_TREASURY_KEYPAIR", keypairB64)
+	t.Setenv("BILLING_WITHDRAW_POLL_INTERVAL", "7s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BillingTreasuryKeypair == nil {
+		t.Fatal("treasury keypair nil")
+	}
+	if got := solana.EncodeBase58(cfg.BillingTreasuryKeypair.Public().(ed25519.PublicKey)); got != walletB58 {
+		t.Fatalf("keypair pubkey = %q, want %q", got, walletB58)
+	}
+	if cfg.BillingWithdrawPollInterval != 7*time.Second {
+		t.Fatalf("poll = %v, want 7s", cfg.BillingWithdrawPollInterval)
+	}
+	if cfg.BillingWithdrawBlockhashMaxAge <= 0 {
+		t.Fatalf("blockhash max age = %v, want > 0", cfg.BillingWithdrawBlockhashMaxAge)
+	}
+}
+
+func TestLoadWithdrawalKeypairMismatch(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	keypairB64, _ := genTreasury(t)
+	// A different wallet than the keypair's public key.
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	t.Setenv("BILLING_SOLANA_RPC_URL", "https://rpc.example")
+	t.Setenv("BILLING_DEPOSIT_MINT", "So11111111111111111111111111111111111111112")
+	t.Setenv("BILLING_TREASURY_KEYPAIR", keypairB64)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("err = %v, want mention of mismatch", err)
+	}
+}
+
+func TestLoadWithdrawalKeypairWithoutWallet(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	keypairB64, _ := genTreasury(t)
+	// Keypair set but no treasury wallet: should fail (cannot verify owner).
+	t.Setenv("BILLING_TREASURY_KEYPAIR", keypairB64)
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BILLING_TREASURY_WALLET") {
+		t.Fatalf("err = %v, want mention of BILLING_TREASURY_WALLET", err)
+	}
+}
+
+func TestLoadWithdrawalKeypairBadBase64(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BILLING_TREASURY_WALLET", "11111111111111111111111111111112")
+	t.Setenv("BILLING_SOLANA_RPC_URL", "https://rpc.example")
+	t.Setenv("BILLING_DEPOSIT_MINT", "So11111111111111111111111111111111111111112")
+	t.Setenv("BILLING_TREASURY_KEYPAIR", "!!not-base64!!")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load should reject a non-base64 keypair")
 	}
 }

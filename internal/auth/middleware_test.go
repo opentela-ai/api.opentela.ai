@@ -5,18 +5,25 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/opentela-ai/api/internal/account"
 )
 
 type stubValidator struct {
-	valid    bool
-	err      error
-	gotToken string
+	valid     bool
+	err       error
+	accountID string
+	gotToken  string
 }
 
-func (s *stubValidator) Valid(_ context.Context, token string) (bool, error) {
+func (s *stubValidator) Valid(_ context.Context, token string) (string, bool, error) {
 	s.gotToken = token
-	return s.valid, s.err
+	if !s.valid {
+		return "", false, s.err
+	}
+	return s.accountID, true, s.err
 }
 
 func nextOK() http.Handler {
@@ -158,5 +165,59 @@ func TestMiddlewareNonBearerAuthorizationFallsBackToXAPIKey(t *testing.T) {
 	}
 	if sv.gotToken != "secret-token" {
 		t.Fatalf("validator got token %q, want secret-token", sv.gotToken)
+	}
+}
+
+// doRequestWith runs Middleware with the given options and reports the body
+// the downstream handler wrote, so tests can assert on the threaded account id.
+func doRequestWith(t *testing.T, v TokenValidator, opts Options, headers map[string]string) (int, string) {
+	t.Helper()
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := account.ID(r.Context())
+		if ok {
+			_, _ = w.Write([]byte("acct=" + id))
+		} else {
+			_, _ = w.Write([]byte("no-account"))
+		}
+	})
+	h := Middleware(v, opts)(next)
+	req := httptest.NewRequest(http.MethodPost, "/v1/service/llm/v1/chat/completions", strings.NewReader("{}"))
+	for k, val := range headers {
+		req.Header.Set(k, val)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// A key with an owning account is threaded into request context for the gate
+// to charge, in every mode.
+func TestMiddlewareThreadsAccountID(t *testing.T) {
+	sv := &stubValidator{valid: true, accountID: "acct-7"}
+	for _, opts := range []Options{{}, {EnforceAccount: true}} {
+		code, body := doRequestWith(t, sv, opts, map[string]string{"Authorization": "Bearer t"})
+		if code != http.StatusOK || body != "acct=acct-7" {
+			t.Fatalf("(%+v) code=%d body=%q, want 200/acct=acct-7", opts, code, body)
+		}
+	}
+}
+
+// In enforcement mode an active legacy key (no user_id) is rejected with 402
+// billing_account_required before it reaches a billing-gated route.
+func TestMiddlewareEnforceRejectsLegacyKey(t *testing.T) {
+	sv := &stubValidator{valid: true, accountID: ""}
+	code, body := doRequestWith(t, sv, Options{EnforceAccount: true}, map[string]string{"Authorization": "Bearer t"})
+	if code != http.StatusPaymentRequired || !strings.Contains(body, "billing_account_required") {
+		t.Fatalf("code=%d body=%q, want 402/billing_account_required", code, body)
+	}
+}
+
+// Outside enforcement a legacy key passes with no account in context, so the
+// gate never charges it.
+func TestMiddlewareObserveAllowsLegacyKey(t *testing.T) {
+	sv := &stubValidator{valid: true, accountID: ""}
+	code, body := doRequestWith(t, sv, Options{}, map[string]string{"Authorization": "Bearer t"})
+	if code != http.StatusOK || body != "no-account" {
+		t.Fatalf("code=%d body=%q, want 200/no-account", code, body)
 	}
 }

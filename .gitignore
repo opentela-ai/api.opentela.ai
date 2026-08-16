@@ -8,3 +8,6 @@
 # SDD scratch (briefs, reports, ledger, diffs)
 .superpowers/
 .tinyb
+
+# Compiled server binary (go build ./cmd/server)
+/server

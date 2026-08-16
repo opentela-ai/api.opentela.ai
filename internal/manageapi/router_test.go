@@ -51,7 +51,7 @@ func (keyServiceStub) Revoke(context.Context, string, int64) (bool, error)   { r
 
 func TestRouterRefreshesIdentityForWalletRoutes(t *testing.T) {
 	store := &identityStoreStub{}
-	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, verifierStub{claims: neonauth.Claims{
+	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, nil, nil, verifierStub{claims: neonauth.Claims{
 		Subject:       "user-alice",
 		Email:         "alice@example.com",
 		EmailVerified: true,
@@ -77,7 +77,7 @@ func TestRouterRefreshesIdentityForWalletRoutes(t *testing.T) {
 }
 
 func TestRouterAnswersManagePreflightWithoutJWTVerification(t *testing.T) {
-	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, verifierStub{}, &identityStoreStub{}, []string{"https://app.example"})
+	h := Router(keyServiceStub{}, routeStub{status: http.StatusAccepted}, nil, nil, nil, nil, verifierStub{}, &identityStoreStub{}, []string{"https://app.example"})
 
 	req := httptest.NewRequest(http.MethodOptions, "/manage/wallets", nil)
 	req.Header.Set("Origin", "https://app.example")
@@ -94,7 +94,7 @@ func TestRouterAnswersManagePreflightWithoutJWTVerification(t *testing.T) {
 
 func TestRouterMountsInstanceRoutesOnSharedStack(t *testing.T) {
 	store := &identityStoreStub{}
-	h := Router(keyServiceStub{}, nil, routeStub{status: http.StatusCreated}, nil, verifierStub{claims: neonauth.Claims{
+	h := Router(keyServiceStub{}, nil, routeStub{status: http.StatusCreated}, nil, nil, nil, verifierStub{claims: neonauth.Claims{
 		Subject: "user-bob",
 	}}, store, nil)
 
@@ -108,5 +108,29 @@ func TestRouterMountsInstanceRoutesOnSharedStack(t *testing.T) {
 	}
 	if store.calls != 1 || store.last.AccountID != "user-bob" {
 		t.Fatalf("refresh calls=%d last=%+v, want one refresh for bob", store.calls, store.last)
+	}
+}
+
+func TestRouterMountsBillingRoutesWithAuth(t *testing.T) {
+	h := Router(keyServiceStub{}, nil, nil, nil, nil, routeStub{status: http.StatusTeapot}, verifierStub{claims: neonauth.Claims{
+		Subject: "user-carol",
+	}}, &identityStoreStub{}, []string{"https://app.example"})
+
+	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTeapot {
+		t.Fatalf("code=%d, want 418 (billing route dispatched with auth)", rec.Code)
+	}
+
+	// No Authorization header → the surrounding principal.Middleware rejects
+	// before the billing handler runs.
+	req2 := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("code=%d, want 401 (billing requires auth)", rec2.Code)
 	}
 }

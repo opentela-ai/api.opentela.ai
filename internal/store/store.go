@@ -15,10 +15,13 @@ func HashKey(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// KeyStore is the minimal contract the request path depends on: given a key hash,
-// report whether a matching active key exists.
+// KeyStore is the minimal contract the request path depends on: given a key
+// hash, report whether a matching active key exists and the owning account id
+// it was issued to. The account id is empty for legacy keys (those created
+// before user ownership, api_keys.user_id IS NULL); callers use the empty
+// value to detect keys that cannot be charged.
 type KeyStore interface {
-	Validate(ctx context.Context, keyHash string) (bool, error)
+	Validate(ctx context.Context, keyHash string) (accountID string, ok bool, err error)
 }
 
 // KeyInfo is a row of the api_keys table. ID, Prefix, and UserID are populated

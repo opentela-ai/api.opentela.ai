@@ -13,8 +13,14 @@ import (
 
 const Audience = "api.opentela.ai/internal/acl"
 
+// PricingAudience is the distinct audience for seller ask publication.
+// It is separate from the ACL credential audience so expanding seller
+// eligibility cannot weaken trusted-region ACL credentials.
+const PricingAudience = "api.opentela.ai/internal/pricing"
+
 type Claims struct {
 	Subject            string
+	Audience           string
 	Role               string
 	Region             string
 	MembershipRevision int64
@@ -26,21 +32,39 @@ type Claims struct {
 type Signer struct {
 	kid        string
 	issuer     string
+	audience   string
 	privateKey ed25519.PrivateKey
 }
 
 func NewSigner(kid, issuer string, privateKey ed25519.PrivateKey) *Signer {
-	return &Signer{kid: kid, issuer: issuer, privateKey: privateKey}
+	return NewSignerWithAudience(kid, issuer, Audience, privateKey)
+}
+
+// NewSignerWithAudience returns a Signer that stamps the given audience
+// (e.g. PricingAudience) into every token it issues.
+func NewSignerWithAudience(kid, issuer, audience string, privateKey ed25519.PrivateKey) *Signer {
+	return &Signer{kid: kid, issuer: issuer, audience: audience, privateKey: privateKey}
 }
 
 type Verifier struct {
-	issuer string
-	now    func() time.Time
-	keys   map[string]ed25519.PublicKey
+	issuer            string
+	audience          string
+	requireMembership bool
+	now               func() time.Time
+	keys              map[string]ed25519.PublicKey
 }
 
 func NewVerifier(issuer string, keys map[string]ed25519.PublicKey) *Verifier {
-	return &Verifier{issuer: issuer, now: time.Now, keys: keys}
+	return NewVerifierWithAudience(issuer, Audience, keys)
+}
+
+// NewVerifierWithAudience returns a Verifier that only accepts tokens for the
+// given audience. ACL tokens (the default audience) must carry a valid role,
+// region, and membership revision; pricing tokens are issued to
+// permissionless providers and so relax those claims. This keeps the pricing
+// endpoint from being authorizable by an ACL credential and vice versa.
+func NewVerifierWithAudience(issuer, audience string, keys map[string]ed25519.PublicKey) *Verifier {
+	return &Verifier{issuer: issuer, audience: audience, requireMembership: audience == Audience, now: time.Now, keys: keys}
 }
 
 type jwtHeader struct {
@@ -69,7 +93,7 @@ func (s *Signer) Sign(c Claims) (string, error) {
 	payloadBytes, err := json.Marshal(jwtClaims{
 		Iss:                s.issuer,
 		Sub:                c.Subject,
-		Aud:                Audience,
+		Aud:                s.audience,
 		Exp:                c.ExpiresAt.UTC().Unix(),
 		Iat:                c.IssuedAt.UTC().Unix(),
 		Jti:                c.JTI,
@@ -122,7 +146,10 @@ func (v *Verifier) Verify(_ context.Context, raw string) (Claims, error) {
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 		return Claims{}, fmt.Errorf("nodecred: payload json: %w", err)
 	}
-	if payload.Iss != v.issuer || payload.Aud != Audience || payload.Sub == "" || !validNodeRole(payload.Role) || payload.Region == "" || payload.Jti == "" || payload.MembershipRevision <= 0 || payload.Iat == 0 {
+	if payload.Iss != v.issuer || payload.Aud != v.audience || payload.Sub == "" || payload.Jti == "" || payload.Iat == 0 {
+		return Claims{}, errors.New("nodecred: invalid claims")
+	}
+	if v.requireMembership && (!validNodeRole(payload.Role) || payload.Region == "" || payload.MembershipRevision <= 0) {
 		return Claims{}, errors.New("nodecred: invalid claims")
 	}
 	now := v.now().UTC()
@@ -136,6 +163,7 @@ func (v *Verifier) Verify(_ context.Context, raw string) (Claims, error) {
 	}
 	return Claims{
 		Subject:            payload.Sub,
+		Audience:           payload.Aud,
 		Role:               payload.Role,
 		Region:             payload.Region,
 		MembershipRevision: payload.MembershipRevision,

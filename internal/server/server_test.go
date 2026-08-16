@@ -2,14 +2,24 @@ package server
 
 import (
 	"context"
+	"github.com/opentela-ai/api/internal/auth"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-type stubValidator struct{ valid bool }
+type stubValidator struct {
+	valid     bool
+	accountID string
+}
 
-func (s stubValidator) Valid(context.Context, string) (bool, error) { return s.valid, nil }
+func (s stubValidator) Valid(context.Context, string) (string, bool, error) {
+	if !s.valid {
+		return "", false, nil
+	}
+	return s.accountID, true, nil
+}
 
 func proxyStub() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -292,5 +302,48 @@ func TestModelsRouteFallsThroughWhenCatalogueAbsent(t *testing.T) {
 	h := New(stubValidator{valid: false}, proxyStub(), nil, nil, nil)
 	if rec := do(h, http.MethodGet, "/v1/service/llm/v1/models", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("code=%d, want 401", rec.Code)
+	}
+}
+
+// In enforce mode a valid legacy key (no owning account id) is rejected with
+// 402 billing_account_required before reaching the proxy, while an account
+// key forwards normally.
+func TestEnforceRejectsLegacyKeyThroughProxy(t *testing.T) {
+	h := NewWithControlPlanes(
+		stubValidator{valid: true, accountID: ""}, proxyStub(),
+		nil, nil, nil, nil, nil, nil, nil, nil,
+		auth.Options{EnforceAccount: true},
+	)
+	rec := do(h, http.MethodPost, "/v1/service/llm/v1/chat/completions", "legacy")
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("legacy key code = %d, want 402; body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "billing_account_required") {
+		t.Fatalf("body = %q, want billing_account_required", rec.Body.String())
+	}
+
+	// An account key forwards to the proxy.
+	h2 := NewWithControlPlanes(
+		stubValidator{valid: true, accountID: "acct-9"}, proxyStub(),
+		nil, nil, nil, nil, nil, nil, nil, nil,
+		auth.Options{EnforceAccount: true},
+	)
+	rec2 := do(h2, http.MethodPost, "/v1/service/llm/v1/chat/completions", "owned")
+	if rec2.Code != http.StatusOK || rec2.Body.String() != "proxied" {
+		t.Fatalf("owned key code=%d body=%q, want 200/proxied", rec2.Code, rec2.Body.String())
+	}
+}
+
+// Off/observe (the default Options) never reject a legacy key; it forwards and
+// the gate declines to charge because no account is in context.
+func TestDefaultModeAllowsLegacyKeyThroughProxy(t *testing.T) {
+	h := NewWithControlPlanes(
+		stubValidator{valid: true, accountID: ""}, proxyStub(),
+		nil, nil, nil, nil, nil, nil, nil, nil,
+		auth.Options{},
+	)
+	rec := do(h, http.MethodPost, "/v1/service/llm/v1/chat/completions", "legacy")
+	if rec.Code != http.StatusOK || rec.Body.String() != "proxied" {
+		t.Fatalf("legacy key code=%d body=%q, want 200/proxied", rec.Code, rec.Body.String())
 	}
 }

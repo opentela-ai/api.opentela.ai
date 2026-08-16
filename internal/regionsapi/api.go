@@ -379,6 +379,8 @@ func (s *Service) handlePatchMember(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "not found", http.StatusNotFound)
 			case errors.Is(err, store.ErrChallengeExpired):
 				http.Error(w, "invitation expired", http.StatusConflict)
+			case errors.Is(err, store.ErrRegionMigrationConflict):
+				http.Error(w, "remove trusted service bindings from the current region before migrating", http.StatusConflict)
 			default:
 				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			}

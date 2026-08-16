@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os/signal"
@@ -12,9 +13,13 @@ import (
 
 	"github.com/opentela-ai/api/internal/aclapi"
 	"github.com/opentela-ai/api/internal/auth"
-	"github.com/opentela-ai/api/internal/cache"
+	"github.com/opentela-ai/api/internal/billingapi"
+	"github.com/opentela-ai/api/internal/billinggate"
 	"github.com/opentela-ai/api/internal/catalog"
 	"github.com/opentela-ai/api/internal/config"
+	"github.com/opentela-ai/api/internal/deposits"
+	"github.com/opentela-ai/api/internal/faucet"
+	"github.com/opentela-ai/api/internal/faucetapi"
 	"github.com/opentela-ai/api/internal/instancesapi"
 	"github.com/opentela-ai/api/internal/keysvc"
 	"github.com/opentela-ai/api/internal/leaderboard"
@@ -22,12 +27,17 @@ import (
 	"github.com/opentela-ai/api/internal/mesh"
 	"github.com/opentela-ai/api/internal/neonauth"
 	"github.com/opentela-ai/api/internal/nodecred"
+	"github.com/opentela-ai/api/internal/peers"
 	"github.com/opentela-ai/api/internal/perf"
+	"github.com/opentela-ai/api/internal/pricingapi"
 	"github.com/opentela-ai/api/internal/proxy"
 	"github.com/opentela-ai/api/internal/regionsapi"
 	"github.com/opentela-ai/api/internal/server"
+	"github.com/opentela-ai/api/internal/settlement"
+	"github.com/opentela-ai/api/internal/solana"
 	"github.com/opentela-ai/api/internal/store"
 	"github.com/opentela-ai/api/internal/walletsapi"
+	"github.com/opentela-ai/api/internal/withdraw"
 )
 
 func main() {
@@ -55,7 +65,7 @@ func run() error {
 	}
 	defer pg.Close()
 
-	c := cache.New(cfg.JanitorEvery)
+	c := auth.NewValidationCache(cfg.JanitorEvery)
 	defer c.Close()
 
 	validator := auth.NewValidator(pg, c, cfg.CacheTTL, cfg.CacheNegTTL)
@@ -65,11 +75,57 @@ func run() error {
 	var internalACLv2 http.Handler
 	var nodeChallenge http.Handler
 	var nodeIssue http.Handler
+	var nodePricingChallenge http.Handler
+	var nodePricingIssue http.Handler
 	meshClient := mesh.New(cfg.UpstreamURL)
 	if cfg.KeyMgmtEnabled {
 		verifier := neonauth.New(cfg.NeonAuthJWKSURL, cfg.NeonAuthIssuer, cfg.NeonAuthAudience, cfg.JWKSCacheTTL)
 		svc := keysvc.New(pg, cfg.MaxKeysPerUser)
-		keyMgmt = manageapi.Router(svc, walletsapi.New(pg, cfg.IdentityMaxAge), instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), verifier, pg, cfg.CORSAllowedOrigins)
+		var faucetRoutes manageapi.FaucetRoutes
+		if cfg.FaucetEnabled {
+			faucetSvc, err := faucet.New(cfg.FaucetRPCURL, cfg.FaucetMint, cfg.FaucetTokenProgram, cfg.FaucetWalletKey, cfg.FaucetAmountRaw)
+			if err != nil {
+				return err
+			}
+			faucetRoutes = faucetapi.New(pg, faucetSvc, cfg.FaucetAmountRaw, cfg.FaucetDecimals)
+			log.Printf("OTELA faucet enabled at /manage/faucet (mint %s, %d base units per claim)", cfg.FaucetMint, cfg.FaucetAmountRaw)
+		}
+		ws := walletsapi.New(pg, cfg.IdentityMaxAge)
+		// Step 5: when billing is active, linking a wallet immediately credits
+		// any deposits it received before linkage (the watcher recorded them
+		// 'unassigned'). Billing-off → no reconciler; ReconcileDepositsForWallet
+		// is a harmless no-op on an empty deposit_events table anyway, but we
+		// keep the hook opt-in for clarity.
+		if cfg.BillingMode != config.BillingOff {
+			ws = ws.WithReconciler(depositReconciler{pg})
+		}
+		var billingRoutes manageapi.BillingRoutes
+		if cfg.BillingMode != config.BillingOff {
+			withdrawalsEnabled := cfg.BillingTreasuryKeypair != nil
+			var treasuryATA string
+			if cfg.BillingTreasuryWallet != "" {
+				owner, err := solana.DecodeBase58(cfg.BillingTreasuryWallet, solana.PublicKeyBytes)
+				if err != nil {
+					return fmt.Errorf("BILLING_TREASURY_WALLET is not a valid base58 pubkey: %w", err)
+				}
+				mint, err := solana.DecodeBase58(cfg.BillingDepositMint, solana.PublicKeyBytes)
+				if err != nil {
+					return fmt.Errorf("BILLING_DEPOSIT_MINT is not a valid base58 pubkey: %w", err)
+				}
+				tp, err := solana.DecodeBase58(cfg.BillingDepositTokenProgram, solana.PublicKeyBytes)
+				if err != nil {
+					return fmt.Errorf("BILLING_DEPOSIT_TOKEN_PROGRAM is not a valid base58 pubkey: %w", err)
+				}
+				ata, err := solana.AssociatedTokenAddress(owner, mint, tp)
+				if err != nil {
+					return fmt.Errorf("derive treasury ATA: %w", err)
+				}
+				treasuryATA = solana.EncodeBase58(ata)
+			}
+			billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled)
+			log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
+		}
+		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
 	}
 	var nodeVerifier *nodecred.Verifier
@@ -77,6 +133,9 @@ func run() error {
 		nodeVerifier = nodecred.NewVerifier(cfg.NodeCredentialIssuer, cfg.NodeCredentialVerifyKeys)
 	}
 	aclSvc := aclapi.NewWithNodeVerifier(pg, meshClient, cfg.InternalControlToken, nodeVerifier, cfg.IdentityMaxAge, cfg.OwnershipMaxAge, cfg.DecisionCacheTTL)
+	if cfg.EvaluatorRateLimitRPS > 0 {
+		aclSvc = aclSvc.WithEvaluatorRateLimit(cfg.EvaluatorRateLimitRPS, cfg.EvaluatorRateLimitBurst)
+	}
 	if cfg.InternalACLEnabled {
 		internalACL = aclSvc.HandlerV1()
 		internalACLv2 = aclSvc.HandlerV2()
@@ -86,10 +145,29 @@ func run() error {
 		nodeSvc := nodecred.NewService(pg, meshClient, signer, nodeVerifier, cfg.OwnershipMaxAge, cfg.InternalControlToken)
 		nodeChallenge = nodeSvc.ChallengeHandler()
 		nodeIssue = nodeSvc.IssueHandler()
+		// A pricing-scoped signer (distinct audience) lets the same node
+		// credential service mint seller-ask credentials. It is only mounted
+		// when billing is active, below.
+		if cfg.BillingMode != config.BillingOff {
+			pricingSigner := nodecred.NewSignerWithAudience(cfg.NodeCredentialSigningKID, cfg.NodeCredentialIssuer, nodecred.PricingAudience, cfg.NodeCredentialSigningKey)
+			pnode := nodeSvc.WithPricing(pricingSigner)
+			nodePricingChallenge = pnode.PricingChallengeHandler()
+			nodePricingIssue = pnode.PricingIssueHandler()
+		}
 	}
 	// Public catalogue: distilled from the upstream node table, cached so a
-	// keyless endpoint cannot be used to hammer the node.
-	catalogHandler := catalog.NewWithPolicies(cfg.UpstreamURL, catalogCacheTTL, pg)
+	// keyless endpoint cannot be used to hammer the node. It shares the one
+	// policy-filtered peers.Service with the billing gate (created below) so
+	// the market view and the routing constraint observe the same providers.
+	peerSnap := peers.New(cfg.UpstreamURL, catalogCacheTTL, pg)
+	catalogHandler := catalog.NewWithSnapshot(peerSnap, catalogCacheTTL)
+	// Step 6: when billing is active, the public catalogue also serves a
+	// `market` array (price discovery) distilled from the same live asks the
+	// billing gate quotes against, so buyers and sellers see one truth. With
+	// billing off the response keeps its original services-only shape.
+	if cfg.BillingMode != config.BillingOff {
+		catalogHandler = catalogHandler.WithAsks(pg)
+	}
 
 	// GPU performance pipeline (optional): sample every routed response into
 	// the configured analytics store (Tinybird Forward, or self-managed
@@ -110,6 +188,9 @@ func run() error {
 		sink, leaderboardHandler = s, leaderboard.New(leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword), cfg.LeaderboardCacheTTL)
 		log.Printf("GPU performance pipeline enabled (ClickHouse %s, database %s)", cfg.ClickHouseURL.Host, cfg.ClickHouseDatabase)
 	}
+	var sweeperDone chan struct{}
+	var depositDone chan struct{}
+	var withdrawDone chan struct{}
 	var sinkDone chan struct{}
 	if sink != nil {
 		sinkDone = make(chan struct{})
@@ -117,9 +198,102 @@ func run() error {
 			defer close(sinkDone)
 			sink.Run(ctx)
 		}()
+	}
+	billingOpts := auth.Options{EnforceAccount: cfg.BillingMode == config.BillingEnforce}
+
+	// The billing gate wraps the inference proxy when billing is active. It
+	// resolves affordable live peers, reserves conservatively, and stamps
+	// X-Otela-Allowed-Peers before forwarding. In off mode the gate is nil,
+	// so the proxy is passed through unchanged.
+	var billingGate http.Handler
+	var pricingHandler http.Handler
+	if cfg.BillingMode != config.BillingOff {
+		gateSvc := billinggate.New(pg, peerSnap, cfg.BillingMode, cfg.BillingOutputMax, cfg.BillingFeeBps)
+
+		// Settlement finalizes each reserved request against the exact usage
+		// parsed by the perf hook (no second body parse). The settler runs
+		// inside the response hook, so it shares the same *measureBody parser
+		// state that produces the perf sample.
+		settler := settlement.New(pg, cfg.BillingFeeBps, time.Time{})
+		resolve := perf.NewResolver(cfg.UpstreamURL, cfg.PerfPeerCacheTTL)
+		switch {
+		case sink != nil:
+			perfHook = perf.HookWithSettle(sink, resolve, settler.Callback)
+		default:
+			perfHook = perf.HookWithSettle(perf.Null(), resolve, settler.Callback)
+		}
+
+		billingGate = gateSvc.Middleware(http.Handler(proxy.NewWithPerfHook(cfg.UpstreamURL, perfHook)))
+
+		// Seller ask publication: POST /internal/pricing, authenticated by a
+		// pricing-scoped node credential (distinct audience from ACL).
+		pricingVerifier := nodecred.NewVerifierWithAudience(cfg.NodeCredentialIssuer, nodecred.PricingAudience, cfg.NodeCredentialVerifyKeys)
+		pricingSvc := pricingapi.New(pg, meshClient, pricingVerifier, catalogAllowlist(catalogHandler), cfg.OwnershipMaxAge)
+		pricingHandler = pricingSvc.Handler()
+
+		// Recovery worker: reclaim reservations whose response hook never ran
+		// (crashed proxy, lost connection). SKIP LOCKED keeps multiple replicas
+		// safe; the age is well above the upstream request timeout.
+		sweeperDone = make(chan struct{})
+		go func() {
+			defer close(sweeperDone)
+			settlement.NewSweeper(pg, cfg.BillingSweepInterval, cfg.BillingSweepAge, 100).Run(ctx)
+		}()
+
+		// Deposit watcher (Step 5): poll the treasury associated token
+		// account at finalized commitment, persist every inbound SPL transfer,
+		// and credit the linked owner. Transfers from wallets that are not yet
+		// linked are left 'unassigned' and reconciled automatically once the
+		// wallet is linked (walletsapi.Service). The watcher reuses the faucet
+		// mint/token-program when BILLING_DEPOSIT_MINT is unset, since devnet
+		// deposits use the same network. Requires BILLING_TREASURY_WALLET.
+		if cfg.BillingTreasuryWallet != "" {
+			rpcClient := solana.NewRPCClient(cfg.BillingSolanaRPC, solana.WithRPCTimeout(20*time.Second))
+			watcher, err := deposits.New(rpcClient, pg, pg, cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositPollInterval)
+			if err != nil {
+				return fmt.Errorf("deposit watcher: %w", err)
+			}
+			watcher.SetLogger(func(format string, args ...any) { log.Printf("deposits: "+format, args...) })
+			depositDone = make(chan struct{})
+			go func() {
+				defer close(depositDone)
+				watcher.Run(ctx)
+			}()
+			log.Printf("deposit watcher enabled (treasury %s, mint %s, poll %s)", cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingDepositPollInterval)
+		}
+
+		// Withdrawal worker (Step 7): drain durable withdrawal records
+		// (reserved -> signed -> broadcast -> finalized) into on-chain SPL
+		// transfers signed by the treasury keypair. The worker starts only
+		// when the keypair is configured AND verified to own
+		// BILLING_TREASURY_WALLET (config.Load rejects a mismatch on boot),
+		// so a deposit-only deployment with no keypair keeps the worker off.
+		if cfg.BillingTreasuryKeypair != nil {
+			withdrawRPC := solana.NewRPCClient(cfg.BillingSolanaRPC, solana.WithRPCTimeout(20*time.Second))
+			worker, err := withdraw.New(withdrawRPC, pg, cfg.BillingTreasuryKeypair, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingWithdrawPollInterval, cfg.BillingWithdrawBlockhashMaxAge)
+			if err != nil {
+				return fmt.Errorf("withdrawal worker: %w", err)
+			}
+			worker.SetLogger(func(format string, args ...any) { log.Printf("withdraw: "+format, args...) })
+			withdrawDone = make(chan struct{})
+			go func() {
+				defer close(withdrawDone)
+				worker.Run(ctx)
+			}()
+			log.Printf("withdrawal worker enabled (treasury %s, mint %s, poll %s)", cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingWithdrawPollInterval)
+		}
+	} else if sink != nil {
 		perfHook = perf.Hook(sink, perf.NewResolver(cfg.UpstreamURL, cfg.PerfPeerCacheTTL))
 	}
-	handler := server.NewWithControlPlanes(validator, proxy.NewWithPerfHook(cfg.UpstreamURL, perfHook), keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins)
+
+	proxyHandler := http.Handler(proxy.NewWithPerfHook(cfg.UpstreamURL, perfHook))
+	if billingGate != nil {
+		proxyHandler = billingGate
+	}
+	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue)
+	if cfg.BillingMode != config.BillingOff {
+		log.Printf("billing mode %s (output token max %d)", cfg.BillingMode, cfg.BillingOutputMax)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -152,6 +326,52 @@ func run() error {
 				log.Println("perf sink flush timed out on shutdown")
 			}
 		}
+		if sweeperDone != nil {
+			select {
+			case <-sweeperDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
+		if depositDone != nil {
+			select {
+			case <-depositDone:
+			case <-time.After(2 * time.Second):
+				log.Println("deposit watcher did not stop within 2s on shutdown")
+			}
+		}
+		if withdrawDone != nil {
+			select {
+			case <-withdrawDone:
+			case <-time.After(2 * time.Second):
+				log.Println("withdrawal worker did not stop within 2s on shutdown")
+			}
+		}
 		return err
 	}
+}
+
+// catalogAllowlist builds the seller-pricing allowlist from the shared catalog
+// handler's distilled service list. It converts []catalog.Service →
+// []pricingapi.AllowEntry so the pricing package has no catalog dependency.
+func catalogAllowlist(c *catalog.Handler) pricingapi.Allowlist {
+	return pricingapi.CatalogAllowlist(func(ctx context.Context) ([]pricingapi.AllowEntry, error) {
+		services, err := c.ServicesForPricing(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]pricingapi.AllowEntry, len(services))
+		for i, svc := range services {
+			out[i] = pricingapi.AllowEntry{Name: svc.Name, Models: svc.Models}
+		}
+		return out, nil
+	})
+}
+
+// depositReconciler adapts *store.Postgres.ReconcileDepositsForWallet
+// (which takes an explicit now for deterministic tests) to the
+// walletsapi.Reconciler interface, supplying the current time.
+type depositReconciler struct{ s *store.Postgres }
+
+func (a depositReconciler) ReconcileDepositsForWallet(ctx context.Context, wallet, accountID string) (int, error) {
+	return a.s.ReconcileDepositsForWallet(ctx, wallet, accountID, time.Now().UTC())
 }

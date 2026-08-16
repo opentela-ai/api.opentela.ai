@@ -7,7 +7,7 @@ import (
 )
 
 func TestSetGetHit(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	c.Set("k", true, time.Minute)
 	got, ok := c.Get("k")
@@ -17,7 +17,7 @@ func TestSetGetHit(t *testing.T) {
 }
 
 func TestGetMiss(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	if _, ok := c.Get("absent"); ok {
 		t.Fatal("Get(absent) ok = true, want false")
@@ -25,7 +25,7 @@ func TestGetMiss(t *testing.T) {
 }
 
 func TestNegativeValueCached(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	c.Set("bad", false, time.Minute)
 	got, ok := c.Get("bad")
@@ -35,7 +35,7 @@ func TestNegativeValueCached(t *testing.T) {
 }
 
 func TestExpiryIsMiss(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	base := time.Unix(1000, 0)
 	c.now = func() time.Time { return base }
@@ -48,7 +48,7 @@ func TestExpiryIsMiss(t *testing.T) {
 }
 
 func TestDeleteExpiredEvicts(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	base := time.Unix(1000, 0)
 	c.now = func() time.Time { return base }
@@ -64,7 +64,7 @@ func TestDeleteExpiredEvicts(t *testing.T) {
 }
 
 func TestConcurrentAccess(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -80,7 +80,7 @@ func TestConcurrentAccess(t *testing.T) {
 }
 
 func TestGetDeletesExpiredEntry(t *testing.T) {
-	c := New(0)
+	c := New[bool](0)
 	defer c.Close()
 	base := time.Unix(1000, 0)
 	c.now = func() time.Time { return base }
@@ -95,13 +95,13 @@ func TestGetDeletesExpiredEntry(t *testing.T) {
 }
 
 func TestDoubleCloseIsSafe(t *testing.T) {
-	c := New(5 * time.Millisecond)
+	c := New[bool](5 * time.Millisecond)
 	c.Close()
 	c.Close() // must not panic
 }
 
 func TestJanitorEvictsExpiredEntries(t *testing.T) {
-	c := New(5 * time.Millisecond)
+	c := New[bool](5 * time.Millisecond)
 	defer c.Close()
 	c.Set("k", true, 1*time.Millisecond)
 

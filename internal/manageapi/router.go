@@ -13,6 +13,8 @@ import (
 type WalletRoutes interface{ Routes() http.Handler }
 type InstanceRoutes interface{ Routes() http.Handler }
 type RegionRoutes interface{ Routes() http.Handler }
+type FaucetRoutes interface{ Routes() http.Handler }
+type BillingRoutes interface{ Routes() http.Handler }
 
 type identityStore interface {
 	RefreshIdentity(ctx context.Context, in store.IdentityInfo) error
@@ -30,7 +32,7 @@ func (r identityRefresher) RefreshIdentity(ctx context.Context, p principal.Prin
 	})
 }
 
-func Router(keySvc keysapi.Service, wallets WalletRoutes, instances InstanceRoutes, regions RegionRoutes, v principal.Verifier, pg identityStore, corsOrigins []string) http.Handler {
+func Router(keySvc keysapi.Service, wallets WalletRoutes, instances InstanceRoutes, regions RegionRoutes, faucetRoutes FaucetRoutes, billingRoutes BillingRoutes, v principal.Verifier, pg identityStore, corsOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/manage/keys", keysapi.Routes(keySvc))
 	mux.Handle("/manage/keys/", keysapi.Routes(keySvc))
@@ -48,6 +50,16 @@ func Router(keySvc keysapi.Service, wallets WalletRoutes, instances InstanceRout
 		h := regions.Routes()
 		mux.Handle("/manage/regions", h)
 		mux.Handle("/manage/regions/", h)
+	}
+	if faucetRoutes != nil {
+		h := faucetRoutes.Routes()
+		mux.Handle("/manage/faucet", h)
+		mux.Handle("/manage/faucet/", h)
+	}
+	if billingRoutes != nil {
+		h := billingRoutes.Routes()
+		mux.Handle("/manage/billing", h)
+		mux.Handle("/manage/billing/", h)
 	}
 	return corsmw.Middleware(corsOrigins)(principal.Middleware(v, identityRefresher{store: pg}, nil)(mux))
 }

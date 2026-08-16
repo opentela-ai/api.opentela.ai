@@ -25,6 +25,13 @@ func newTestStore(t *testing.T) *Postgres {
 	}
 	t.Cleanup(p.Close)
 	if err := p.Migrate(ctx, `
+		DROP TABLE IF EXISTS withdrawals;
+		DROP TABLE IF EXISTS deposit_cursors;
+		DROP TABLE IF EXISTS deposit_events;
+		DROP TABLE IF EXISTS credit_ledger;
+		DROP TABLE IF EXISTS billing_requests;
+		DROP TABLE IF EXISTS peer_asks;
+		DROP TABLE IF EXISTS account_credits;
 		DROP TABLE IF EXISTS node_credential_challenges;
 		DROP TABLE IF EXISTS instance_service_acl_rules;
 		DROP TABLE IF EXISTS instance_services;
@@ -38,6 +45,7 @@ func newTestStore(t *testing.T) *Postgres {
 		DROP TABLE IF EXISTS user_wallets;
 		DROP TABLE IF EXISTS account_identities;
 		DROP TABLE IF EXISTS api_keys;
+		DROP TABLE IF EXISTS faucet_claims;
 	`); err != nil {
 		t.Fatalf("drop: %v", err)
 	}
@@ -64,16 +72,16 @@ func TestPostgresValidateLifecycle(t *testing.T) {
 	hash := HashKey("token-1")
 
 	// Unknown key → not valid, no error.
-	if ok, err := p.Validate(ctx, hash); err != nil || ok {
-		t.Fatalf("Validate(unknown) = (%v,%v), want (false,nil)", ok, err)
+	if id, ok, err := p.Validate(ctx, hash); err != nil || ok || id != "" {
+		t.Fatalf("Validate(unknown) = (%q,%v,%v), want (\"\",false,nil)", id, ok, err)
 	}
 
-	// Insert → valid.
+	// Insert → valid (legacy key, no owner).
 	if err := p.Insert(ctx, hash, "alice"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	if ok, err := p.Validate(ctx, hash); err != nil || !ok {
-		t.Fatalf("Validate(active) = (%v,%v), want (true,nil)", ok, err)
+	if id, ok, err := p.Validate(ctx, hash); err != nil || !ok || id != "" {
+		t.Fatalf("Validate(active) = (%q,%v,%v), want (\"\",true,nil)", id, ok, err)
 	}
 
 	// Revoke → not valid.
@@ -81,8 +89,8 @@ func TestPostgresValidateLifecycle(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("Revoke = (%v,%v), want (true,nil)", changed, err)
 	}
-	if ok, err := p.Validate(ctx, hash); err != nil || ok {
-		t.Fatalf("Validate(revoked) = (%v,%v), want (false,nil)", ok, err)
+	if id, ok, err := p.Validate(ctx, hash); err != nil || ok || id != "" {
+		t.Fatalf("Validate(revoked) = (%q,%v,%v), want (\"\",false,nil)", id, ok, err)
 	}
 
 	// List returns the row.
@@ -116,8 +124,8 @@ func TestPostgresUserKeyLifecycle(t *testing.T) {
 	}
 
 	// The inserted key validates through the existing proxy path.
-	if ok, err := p.Validate(ctx, HashKey("tok-a")); err != nil || !ok {
-		t.Fatalf("Validate(new user key) = (%v,%v), want (true,nil)", ok, err)
+	if id, ok, err := p.Validate(ctx, HashKey("tok-a")); err != nil || !ok || id != "user-alice" {
+		t.Fatalf("Validate(new user key) = (%q,%v,%v), want (\"user-alice\",true,nil)", id, ok, err)
 	}
 
 	// Listing is owner-scoped and never leaks another user's keys.
@@ -387,5 +395,190 @@ func TestPostgresServicePolicyReleaseInvariant(t *testing.T) {
 	}
 	if changed, err := p.ReleaseMembership(ctx, owner, inst.ID); err != nil || !changed {
 		t.Fatalf("ReleaseMembership after disable = (%v,%v), want true,nil", changed, err)
+	}
+}
+
+// TestPostgresRegionMigrationGuarded verifies that accepting an invitation to
+// a new region is rejected with ErrRegionMigrationConflict while trusted
+// service bindings tied to the old region still exist. Without the guard,
+// the ON CONFLICT DO UPDATE would silently move the membership and the FK
+// on instance_services(region_id, instance_id) would dangle.
+func TestPostgresRegionMigrationGuarded(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	const owner = "user-owner"
+
+	wallet, err := p.LinkWallet(ctx, owner, "wallet-owner")
+	if err != nil {
+		t.Fatalf("LinkWallet: %v", err)
+	}
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	inst, err := p.CreateInstance(ctx, InstanceInfo{
+		AccountID:           owner,
+		PeerID:              "peer-migrate",
+		OwnerWallet:         wallet.Wallet,
+		AccessMode:          "restricted",
+		OwnershipStatus:     "active",
+		ObservedWallet:      &wallet.Wallet,
+		OwnershipObservedAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("CreateInstance: %v", err)
+	}
+
+	regionA, err := p.CreateRegion(ctx, RegionInfo{Slug: "region-a", Name: "A", OwnerAccountID: owner, Status: "active"})
+	if err != nil {
+		t.Fatalf("CreateRegion A: %v", err)
+	}
+	regionB, err := p.CreateRegion(ctx, RegionInfo{Slug: "region-b", Name: "B", OwnerAccountID: owner, Status: "active"})
+	if err != nil {
+		t.Fatalf("CreateRegion B: %v", err)
+	}
+
+	// Admit into region A.
+	if _, err := p.CreateRegionInvitation(ctx, owner, regionA.ID, inst.ID, "worker", "token-a", now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("CreateRegionInvitation A: %v", err)
+	}
+	if _, err := p.AcceptRegionInvitation(ctx, owner, regionA.ID, inst.ID, "token-a", now); err != nil {
+		t.Fatalf("AcceptRegionInvitation A: %v", err)
+	}
+
+	// Add a trusted service binding in region A — this is what makes a
+	// silent migration unsafe.
+	if _, err := p.ReplaceInstanceServicePolicy(ctx, owner, inst.ID, ReplaceServicePolicyInput{
+		PolicyScope: PolicyScopeService,
+		Inventory: ServiceInventory{
+			ObservedAt:       now,
+			SupportsPolicyV2: true,
+			Services:         []ObservedService{{Name: "llm", Count: 1}},
+		},
+		Services: []InstanceService{{
+			ServiceName: "llm",
+			Exposure:    ExposureTrustedRegion,
+			RegionID:    &regionA.ID,
+			AccessMode:  AccessModePublic,
+		}},
+	}); err != nil {
+		t.Fatalf("ReplaceInstanceServicePolicy: %v", err)
+	}
+
+	// Accepting an invitation into region B must be rejected, not silently
+	// move the membership.
+	if _, err := p.CreateRegionInvitation(ctx, owner, regionB.ID, inst.ID, "worker", "token-b", now.Add(10*time.Minute)); err != nil {
+		t.Fatalf("CreateRegionInvitation B: %v", err)
+	}
+	if _, err := p.AcceptRegionInvitation(ctx, owner, regionB.ID, inst.ID, "token-b", now); !errors.Is(err, ErrRegionMigrationConflict) {
+		t.Fatalf("AcceptRegionInvitation B err=%v, want ErrRegionMigrationConflict", err)
+	}
+
+	// After disabling the binding, migration is permitted.
+	if _, err := p.ReplaceInstanceServicePolicy(ctx, owner, inst.ID, ReplaceServicePolicyInput{
+		PolicyScope: PolicyScopeService,
+		Inventory: ServiceInventory{
+			ObservedAt:       now,
+			SupportsPolicyV2: true,
+			Services:         []ObservedService{{Name: "llm", Count: 1}},
+		},
+		Services: []InstanceService{{
+			ServiceName: "llm",
+			Exposure:    ExposureDisabled,
+			AccessMode:  AccessModePublic,
+		}},
+	}); err != nil {
+		t.Fatalf("ReplaceInstanceServicePolicy(disable): %v", err)
+	}
+	if _, err := p.AcceptRegionInvitation(ctx, owner, regionB.ID, inst.ID, "token-b", now); err != nil {
+		t.Fatalf("AcceptRegionInvitation B after disable err=%v, want nil", err)
+	}
+}
+
+// TestFaucetClaimLifecycle exercises the two-phase claim flow against a real
+// Postgres: a pending reservation blocks a concurrent insert, completing the
+// claim records the signature, and clearing a pending claim allows a retry.
+func TestFaucetClaimLifecycle(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+	const accountID = "acct-faucet-lifecycle"
+
+	// No claim yet.
+	if _, err := p.GetFaucetClaim(ctx, accountID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetFaucetClaim before claim: err=%v, want ErrNotFound", err)
+	}
+
+	// Phase 1: reserve a pending claim (empty signature).
+	reserved, err := p.ClaimFaucet(ctx, accountID, "WalletOne", "", 1_000_000_000)
+	if err != nil || !reserved {
+		t.Fatalf("ClaimFaucet reserve: reserved=%v err=%v", reserved, err)
+	}
+
+	// A concurrent reservation for the same account must be rejected (the
+	// pending row is recent, not stale).
+	again, err := p.ClaimFaucet(ctx, accountID, "WalletOne", "", 1_000_000_000)
+	if err != nil || again {
+		t.Fatalf("ClaimFaucet duplicate: again=%v err=%v, want false nil", again, err)
+	}
+
+	// The pending claim should not yet look "claimed" to the status endpoint.
+	claim, err := p.GetFaucetClaim(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetFaucetClaim pending: %v", err)
+	}
+	if claim.TxSignature != "" {
+		t.Fatalf("pending claim tx_signature = %q, want empty", claim.TxSignature)
+	}
+
+	// Phase 3: complete the claim with the on-chain signature.
+	if err := p.CompleteFaucetClaim(ctx, accountID, "sig-final"); err != nil {
+		t.Fatalf("CompleteFaucetClaim: %v", err)
+	}
+
+	// Completing again must fail (the row is no longer pending).
+	if err := p.CompleteFaucetClaim(ctx, accountID, "sig-late"); err == nil {
+		t.Fatal("CompleteFaucetClaim on completed claim: err=nil, want error")
+	}
+
+	claim, err = p.GetFaucetClaim(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetFaucetClaim after complete: %v", err)
+	}
+	if claim.TxSignature != "sig-final" {
+		t.Fatalf("completed claim tx_signature = %q, want sig-final", claim.TxSignature)
+	}
+
+	// A completed claim blocks a new reservation.
+	again, err = p.ClaimFaucet(ctx, accountID, "WalletOne", "", 1_000_000_000)
+	if err != nil || again {
+		t.Fatalf("ClaimFaucet after complete: again=%v err=%v, want false nil", again, err)
+	}
+
+	// Clearing a completed claim must be a no-op (it is never cleared).
+	if err := p.ClearFaucetClaim(ctx, accountID); err != nil {
+		t.Fatalf("ClearFaucetClaim on completed: %v", err)
+	}
+	if _, err := p.GetFaucetClaim(ctx, accountID); err != nil {
+		t.Fatalf("completed claim should still exist after ClearFaucetClaim: %v", err)
+	}
+}
+
+// TestFaucetClaimClearPending verifies that clearing a pending claim (on-chain
+// send failure) lets the account retry.
+func TestFaucetClaimClearPending(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+	const accountID = "acct-faucet-clear"
+
+	if _, err := p.ClaimFaucet(ctx, accountID, "WalletTwo", "", 500); err != nil {
+		t.Fatalf("ClaimFaucet reserve: %v", err)
+	}
+	if err := p.ClearFaucetClaim(ctx, accountID); err != nil {
+		t.Fatalf("ClearFaucetClaim: %v", err)
+	}
+	if _, err := p.GetFaucetClaim(ctx, accountID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetFaucetClaim after clear: err=%v, want ErrNotFound", err)
+	}
+	// The account can now reserve again.
+	reserved, err := p.ClaimFaucet(ctx, accountID, "WalletTwo", "", 500)
+	if err != nil || !reserved {
+		t.Fatalf("ClaimFaucet after clear: reserved=%v err=%v", reserved, err)
 	}
 }

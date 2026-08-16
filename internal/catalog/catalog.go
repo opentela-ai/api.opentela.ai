@@ -17,8 +17,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/opentela-ai/api/internal/store"
+	"github.com/opentela-ai/api/internal/billing"
+	"github.com/opentela-ai/api/internal/peers"
 )
+
+// AskSource is the live-ask feed the catalog distils into the `market`
+// array. It is satisfied by *store.Postgres (via its LiveAsks) and by the
+// billing gate's BillingStore; the catalog accepts it as an interface so the
+// public price surface and the gate never disagree about who is quoting.
+type AskSource interface {
+	LiveAsks(ctx context.Context, service, model string, now time.Time) ([]billing.Ask, error)
+}
 
 // Service is one row of the public catalogue.
 type Service struct {
@@ -31,9 +40,33 @@ type Service struct {
 	Online         int      `json:"online"`
 }
 
-// Response is the JSON body served to callers.
+// Response is the JSON body served to callers. Market is non-nil only when
+// the handler is wired with a live-ask source (billing active); otherwise it
+// is omitted so callers see no prices at all.
 type Response struct {
-	Services []Service `json:"services"`
+	Services []Service     `json:"services"`
+	Market   []MarketEntry `json:"market,omitempty"`
+}
+
+// MarketEntry is one row of the price discovery surface: for each (service,
+// model) the mesh serves, the minimum, median, and maximum published rate per
+// million tokens, plus how many providers are quoting. A provider count of
+// zero means the model is served but nobody has published an ask yet
+// (requests would 503 `no_provider` under enforcement).
+type MarketEntry struct {
+	Service     string      `json:"service"`
+	Model       string      `json:"model"`
+	Quoters     int         `json:"quoters"`
+	Input       priceTriple `json:"input_per_million"`
+	CachedInput priceTriple `json:"cached_input_per_million"`
+	Output      priceTriple `json:"output_per_million"`
+}
+
+// priceTriple is the min/median/max published rate for one tier.
+type priceTriple struct {
+	Min    int64 `json:"min"`
+	Median int64 `json:"median"`
+	Max    int64 `json:"max"`
 }
 
 // Model is one entry in the OpenAI-shaped model list served at
@@ -55,17 +88,13 @@ type ModelList struct {
 }
 
 // PeerService is the subset of an upstream service entry this package reads.
-type PeerService struct {
-	Name          string   `json:"name"`
-	IdentityGroup []string `json:"identity_group"`
-}
+// It is an alias for peers.PeerService so the catalog and the billing gate
+// share one shape without importing each other.
+type PeerService = peers.PeerService
 
 // Peer is the subset of an upstream node-table entry this package reads.
 // Everything else in that payload is deliberately dropped.
-type Peer struct {
-	Connected bool          `json:"connected"`
-	Service   []PeerService `json:"service"`
-}
+type Peer = peers.Peer
 
 const modelPrefix = "model="
 
@@ -130,35 +159,46 @@ func sortedKeys(set map[string]struct{}) []string {
 }
 
 // Handler serves the distilled catalogue, caching the upstream read so a public
-// endpoint cannot be used to hammer the node.
+// endpoint cannot be used to hammer the node. The policy-filtered snapshot is
+// shared with the billing gate (internal/peers): this handler summarizes it for
+// the public catalog, the gate resolves seller identity from it.
 type Handler struct {
-	upstream *url.URL
-	client   *http.Client
-	ttl      time.Duration
-	policy   policyStore
+	snap *peers.Service
+	ttl  time.Duration
+	asks AskSource // nil → the `market` array is omitted
 
-	mu      sync.Mutex
-	cached  []Service
-	fetched time.Time
+	mu         sync.Mutex
+	cached     []Service
+	cachedSnap *peers.Snapshot
+	fetched    time.Time
 }
 
-type policyStore interface {
-	ListManagedInstancesByPeerIDs(ctx context.Context, peerIDs []string) ([]store.InstanceInfo, error)
+// WithAsks wires a live-ask source so /v1/services also serves a `market`
+// array (price discovery). It is chainable; without it the response keeps the
+// original shape (services only, no prices).
+func (h *Handler) WithAsks(asks AskSource) *Handler {
+	h.asks = asks
+	return h
 }
 
-// New returns a Handler reading the node table from upstream, serving each
-// result for up to ttl.
-func New(upstream *url.URL, ttl time.Duration) *Handler {
-	return NewWithPolicies(upstream, ttl, nil)
+// NewWithPolicies returns a Handler that owns its own peer snapshot. Most
+// production callers should use NewWithSnapshot with a shared *peers.Service
+// so the catalog and the billing gate read from one source of truth; this
+// constructor remains for tests that exercise the catalog in isolation.
+//
+// policy is accepted as peers.PolicyStore so existing callers (catalog tests
+// with a local stub, main.go with *store.Postgres) satisfy it without change:
+// the stub implements ListManagedInstancesByPeerIDs directly.
+func NewWithPolicies(upstream *url.URL, ttl time.Duration, policy peers.PolicyStore) *Handler {
+	return NewWithSnapshot(peers.New(upstream, ttl, policy), ttl)
 }
 
-func NewWithPolicies(upstream *url.URL, ttl time.Duration, policy policyStore) *Handler {
-	return &Handler{
-		upstream: upstream,
-		client:   &http.Client{Timeout: 10 * time.Second},
-		ttl:      ttl,
-		policy:   policy,
-	}
+// NewWithSnapshot returns a Handler reading from an externally-owned, shared
+// *peers.Service so the public catalogue and the billing gate observe the
+// exact same policy-filtered providers. ttl bounds the catalogue's own
+// distillation cache (a separate concern from the peer snapshot's TTL).
+func NewWithSnapshot(snap *peers.Service, ttl time.Duration) *Handler {
+	return &Handler{snap: snap, ttl: ttl}
 }
 
 // ServeHTTP dispatches by route. GET /v1/services — registered without a
@@ -178,19 +218,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveCatalogue(w http.ResponseWriter, r *http.Request) {
-	services, err := h.services(r.Context())
+	services, snap, err := h.view(r.Context())
 	if err != nil {
 		writeCatalogueError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, Response{Services: services})
+	resp := Response{Services: services}
+	if h.asks != nil {
+		market, err := h.market(r.Context(), services, snap)
+		if err != nil {
+			writeCatalogueError(w, err)
+			return
+		}
+		resp.Market = market
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // serveModels writes an OpenAI-shaped model list for the named service. An
 // unknown service yields an empty list (still 200): the OpenAI model-list
 // contract is a list, not a lookup, and some clients reject a 404 here.
 func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, service string) {
-	services, err := h.services(r.Context())
+	services, _, err := h.view(r.Context())
 	if err != nil {
 		writeCatalogueError(w, err)
 		return
@@ -205,6 +254,85 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request, service st
 		Object: "list",
 		Data:   modelsForService(services, service, created),
 	})
+}
+
+// market distils live asks into one price-discovery row per (service, model)
+// the mesh serves. For each row it queries the ask source, drops expired
+// quotes, and reports the min/median/max of the three published rates plus
+// how many providers are quoting. Models that are served but have no live
+// ask still appear, with quoters=0 and zeroed triples, so the UI can show
+// "not yet priced" rather than silently omitting the route.
+// ErrAskUnavailable is returned by market when the live-ask source fails;
+// the catalogue surfaces it as 503 (service outage) rather than the 502 used
+// for upstream mesh errors.
+var ErrAskUnavailable = errors.New("catalogue: ask source unavailable")
+
+func (h *Handler) market(ctx context.Context, services []Service, snap *peers.Snapshot) ([]MarketEntry, error) {
+	now := time.Now().UTC()
+	var out []MarketEntry
+	for _, svc := range services {
+		for _, model := range svc.Models {
+			asks, err := h.asks.LiveAsks(ctx, svc.Name, model, now)
+			if err != nil {
+				return nil, ErrAskUnavailable
+			}
+			out = append(out, marketTriple(svc.Name, model, asks, snap, now))
+		}
+	}
+	return out, nil
+}
+
+// marketTriple reduces one (service, model)'s live asks to a MarketEntry,
+// dropping any quote whose ExpiresAt has passed or whose peer is not in the
+// current billable/routable snapshot for that route.
+func marketTriple(service, model string, asks []billing.Ask, snap *peers.Snapshot, now time.Time) MarketEntry {
+	live := make([]billing.Ask, 0, len(asks))
+	for _, a := range asks {
+		if !a.ExpiresAt.IsZero() && !a.ExpiresAt.After(now) {
+			continue
+		}
+		if snap == nil || !peerCanQuote(snap, a.PeerID, service, model) {
+			continue
+		}
+		live = append(live, a)
+	}
+	if len(live) == 0 {
+		return MarketEntry{Service: service, Model: model}
+	}
+	inputs := rates(live, func(a billing.Ask) int64 { return a.InputPerMillion })
+	cached := rates(live, func(a billing.Ask) int64 { return a.CachedInputPerMillion })
+	outputs := rates(live, func(a billing.Ask) int64 { return a.OutputPerMillion })
+	return MarketEntry{
+		Service:     service,
+		Model:       model,
+		Quoters:     len(live),
+		Input:       triple(inputs),
+		CachedInput: triple(cached),
+		Output:      triple(outputs),
+	}
+}
+
+// rates collects one rate from each live ask and sorts ascending.
+func rates(asks []billing.Ask, pick func(billing.Ask) int64) []int64 {
+	out := make([]int64, len(asks))
+	for i, a := range asks {
+		out[i] = pick(a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// triple returns the min/median/max of a sorted-ascending slice.
+func triple(sorted []int64) priceTriple {
+	n := len(sorted)
+	if n == 0 {
+		return priceTriple{}
+	}
+	med := sorted[n/2]
+	if n%2 == 0 {
+		med = (sorted[n/2-1] + sorted[n/2]) / 2
+	}
+	return priceTriple{Min: sorted[0], Median: med, Max: sorted[n-1]}
 }
 
 // modelsForService returns one OpenAI Model entry per served-model alias the
@@ -236,8 +364,7 @@ func modelsForService(services []Service, service string, created int64) []Model
 // the same upstream fetch.
 func writeCatalogueError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
-	var policyErr errPolicyUnavailable
-	if errors.As(err, &policyErr) {
+	if errors.Is(err, peers.ErrPolicyUnavailable) || errors.Is(err, ErrAskUnavailable) {
 		// Once policy filtering is enabled, an unavailable policy store makes
 		// the permissionless/trusted classification indeterminate. Fail closed
 		// as a control-plane outage rather than presenting unfiltered mesh data.
@@ -246,115 +373,66 @@ func writeCatalogueError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, map[string]string{"error": "catalogue unavailable"})
 }
 
+// ServicesForPricing returns the distilled service list for the pricing
+// API's allowlist, without exposing the catalog's internal cache state. The
+// pricing package converts []Service → []AllowEntry.
+func (h *Handler) ServicesForPricing(ctx context.Context) ([]Service, error) {
+	services, _, err := h.view(ctx)
+	return services, err
+}
+
 func (h *Handler) services(ctx context.Context) ([]Service, error) {
+	services, _, err := h.view(ctx)
+	return services, err
+}
+
+func (h *Handler) view(ctx context.Context) ([]Service, *peers.Snapshot, error) {
 	h.mu.Lock()
-	if h.cached != nil && time.Since(h.fetched) < h.ttl {
+	if h.cached != nil && h.cachedSnap != nil && time.Since(h.fetched) < h.ttl {
 		cached := h.cached
+		snap := h.cachedSnap
 		h.mu.Unlock()
-		return cached, nil
+		return cached, snap, nil
 	}
 	h.mu.Unlock()
 
-	table, err := h.fetchTable(ctx)
+	snap, err := h.snap.Snapshot(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if h.policy != nil {
-		table, err = h.filterTable(ctx, table)
-		if err != nil {
-			return nil, errPolicyUnavailable{err: err}
-		}
+	table := make(map[string]Peer, len(snap.Entries))
+	for id, e := range snap.Entries {
+		table[id] = e.Peer
 	}
 	services := Summarise(table)
 
 	h.mu.Lock()
-	h.cached, h.fetched = services, time.Now()
+	h.cached, h.cachedSnap, h.fetched = services, snap, time.Now()
 	h.mu.Unlock()
-	return services, nil
+	return services, snap, nil
 }
 
-func (h *Handler) fetchTable(ctx context.Context) (map[string]Peer, error) {
-	target := h.upstream.JoinPath("v1", "dnt", "table")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
-	if err != nil {
-		return nil, err
+func peerCanQuote(snap *peers.Snapshot, peerID, service, model string) bool {
+	entry, ok := snap.Entries[peerID]
+	if !ok || entry.Instance == nil {
+		return false
 	}
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return nil, err
+	if !billing.BillableProvider(entry.Instance.AccountID, entry.Instance.OwnerWallet) {
+		return false
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, errUpstream{status: resp.StatusCode}
-	}
-
-	var table map[string]Peer
-	if err := json.NewDecoder(resp.Body).Decode(&table); err != nil {
-		return nil, err
-	}
-	return table, nil
-}
-
-func (h *Handler) filterTable(ctx context.Context, table map[string]Peer) (map[string]Peer, error) {
-	peerIDs := make([]string, 0, len(table))
-	for peerID := range table {
-		peerIDs = append(peerIDs, peerID)
-	}
-	managed, err := h.policy.ListManagedInstancesByPeerIDs(ctx, peerIDs)
-	if err != nil {
-		return nil, err
-	}
-	managedByPeer := make(map[string]store.InstanceInfo, len(managed))
-	for _, inst := range managed {
-		managedByPeer[inst.PeerID] = inst
-	}
-	filtered := make(map[string]Peer, len(table))
-	for peerID, peer := range table {
-		inst, ok := managedByPeer[peerID]
-		if !ok {
-			filtered[peerID] = peer
+	modelTag := modelPrefix + model
+	for _, svc := range entry.Peer.Service {
+		if svc.Name != service {
 			continue
 		}
-		switch inst.PolicyScope {
-		case store.PolicyScopeService:
-			allowed := make([]PeerService, 0, len(peer.Service))
-			for _, svc := range peer.Service {
-				if service, ok := findPermissionlessService(inst.Services, svc.Name); ok {
-					_ = service
-					allowed = append(allowed, svc)
-				}
+		for _, group := range svc.IdentityGroup {
+			if group == modelTag {
+				return true
 			}
-			peer.Service = allowed
-			filtered[peerID] = peer
-		default:
-			if inst.Membership == nil {
-				filtered[peerID] = peer
-				continue
-			}
-			peer.Service = nil
-			filtered[peerID] = peer
 		}
 	}
-	return filtered, nil
+	return false
 }
-
-func findPermissionlessService(services []store.InstanceService, name string) (store.InstanceService, bool) {
-	for _, svc := range services {
-		if svc.ServiceName == name && svc.Exposure == store.ExposurePermissionless {
-			return svc, true
-		}
-	}
-	return store.InstanceService{}, false
-}
-
-type errUpstream struct{ status int }
-
-func (e errUpstream) Error() string { return http.StatusText(e.status) }
-
-type errPolicyUnavailable struct{ err error }
-
-func (e errPolicyUnavailable) Error() string { return e.err.Error() }
-func (e errPolicyUnavailable) Unwrap() error { return e.err }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

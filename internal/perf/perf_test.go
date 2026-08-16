@@ -554,3 +554,136 @@ func TestFingerprintStableAndAnonymous(t *testing.T) {
 		t.Fatal("fingerprint leaks peer id")
 	}
 }
+
+func TestParserOpenAICachedTokens(t *testing.T) {
+	// OpenAI: prompt_tokens is the aggregate; cached tokens come from
+	// prompt_tokens_details.cached_tokens. Regular input = aggregate - cached.
+	body := `{"model":"gpt-4o","usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":300}}}`
+	p := parseAll(t, "application/json", body)
+	if p.inputTokens != 1000 || p.cachedInputTokens != 300 || p.outputTokens != 50 {
+		t.Fatalf("tokens = agg=%d cached=%d out=%d, want 1000/300/50", p.inputTokens, p.cachedInputTokens, p.outputTokens)
+	}
+	// The settler computes regular = aggregate - cached.
+	if got := p.inputTokens - p.cachedInputTokens; got != 700 {
+		t.Fatalf("regular input = %d, want 700", got)
+	}
+}
+
+func TestParserAnthropicCachedTokens(t *testing.T) {
+	// Anthropic: regular input = input_tokens + cache_creation_input_tokens;
+	// cached input = cache_read_input_tokens.
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":700,"cache_creation_input_tokens":200,"cache_read_input_tokens":150}}}` + "\n\n" +
+		`event: message_delta` + "\n" +
+		`data: {"type":"message_delta","usage":{"output_tokens":40}}` + "\n\n"
+	p := parseAll(t, "text/event-stream", sse)
+	// inputTokens = 700 + 200 = 900 (regular); cachedInputTokens = 150.
+	if p.inputTokens != 900 || p.cachedInputTokens != 150 || p.outputTokens != 40 {
+		t.Fatalf("tokens = agg=%d cached=%d out=%d, want 900/150/40", p.inputTokens, p.cachedInputTokens, p.outputTokens)
+	}
+}
+
+func TestHookWithSettleFiresCachedTokens(t *testing.T) {
+	rec := &sliceRecorder{}
+	var got SettleUsage
+	var gotResp *http.Response
+	hook := HookWithSettle(rec, nil, func(resp *http.Response, u SettleUsage) {
+		got = u
+		gotResp = resp
+	})
+
+	hdr := http.Header{}
+	hdr.Set(PeerHeader, "peer-9")
+	hdr.Set("Content-Type", "application/json")
+	body := `{"model":"gpt-4o","usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":300}}}`
+	resp := newResponse("https://api/v1/service/llm/v1/chat/completions", body, "application/json", hdr)
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if gotResp == nil || got.ServedPeerID != "peer-9" || got.Status != 200 {
+		t.Fatalf("settle usage = %+v", got)
+	}
+	// SettleUsage carries billable regular input, so OpenAI aggregate prompt
+	// tokens are normalized to regular=700 and cached=300 before settlement.
+	if got.InputTokens != 700 || got.CachedInputTokens != 300 || got.OutputTokens != 50 {
+		t.Fatalf("tokens = regular=%d cached=%d out=%d, want 700/300/50", got.InputTokens, got.CachedInputTokens, got.OutputTokens)
+	}
+	if !got.Complete {
+		t.Error("Complete = false for a 2xx response with usage")
+	}
+}
+
+func TestHookWithSettleNormalizesAnthropicCachedTokens(t *testing.T) {
+	rec := &sliceRecorder{}
+	var got SettleUsage
+	hook := HookWithSettle(rec, nil, func(resp *http.Response, u SettleUsage) { got = u })
+
+	hdr := http.Header{}
+	hdr.Set(PeerHeader, "peer-9")
+	hdr.Set("Content-Type", "text/event-stream")
+	sse := "event: message_start\n" +
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":700,"cache_creation_input_tokens":200,"cache_read_input_tokens":150}}}` + "\n\n" +
+		`event: message_delta` + "\n" +
+		`data: {"type":"message_delta","usage":{"output_tokens":40}}` + "\n\n"
+	resp := newResponse("https://api/v1/service/anthropic/v1/messages", sse, "text/event-stream", hdr)
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if got.InputTokens != 900 || got.CachedInputTokens != 150 || got.OutputTokens != 40 {
+		t.Fatalf("tokens = regular=%d cached=%d out=%d, want 900/150/40", got.InputTokens, got.CachedInputTokens, got.OutputTokens)
+	}
+}
+
+func TestHookWithSettleMarksCachedOnlyUsageComplete(t *testing.T) {
+	rec := &sliceRecorder{}
+	var got SettleUsage
+	hook := HookWithSettle(rec, nil, func(resp *http.Response, u SettleUsage) { got = u })
+
+	hdr := http.Header{}
+	hdr.Set(PeerHeader, "peer-1")
+	hdr.Set("Content-Type", "text/event-stream")
+	body := "" +
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-4-5","usage":{"input_tokens":0,"cache_read_input_tokens":150}}}` + "\n\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	resp := newResponse("https://api/v1/service/chat/v1/messages", body, "text/event-stream", hdr)
+
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if got.InputTokens != 0 || got.CachedInputTokens != 150 || got.OutputTokens != 0 {
+		t.Fatalf("tokens = regular=%d cached=%d out=%d, want 0/150/0", got.InputTokens, got.CachedInputTokens, got.OutputTokens)
+	}
+	if !got.Complete {
+		t.Fatal("Complete = false for cached-only billable usage")
+	}
+}
+
+func TestHookWithSettleReleasesClientAbort(t *testing.T) {
+	rec := &sliceRecorder{}
+	var got SettleUsage
+	hook := HookWithSettle(rec, nil, func(resp *http.Response, u SettleUsage) { got = u })
+
+	hdr := http.Header{}
+	hdr.Set(PeerHeader, "peer-9")
+	hdr.Set("Content-Type", "text/event-stream")
+	// A body closed before EOF (client abort) — wrapBody uses strings.Reader
+	// which returns EOF at the end, so simulate abort by an early Close.
+	resp := newResponse("https://api/v1/service/llm/v1/chat/completions", "partial", "text/event-stream", hdr)
+	if err := hook(resp); err != nil {
+		t.Fatal(err)
+	}
+	// Close before reading to EOF simulates a client disconnect.
+	_ = resp.Body.Close()
+	if got.ClientAbort != true || got.Complete != false {
+		t.Fatalf("settle usage = %+v, want ClientAbort/!Complete", got)
+	}
+}

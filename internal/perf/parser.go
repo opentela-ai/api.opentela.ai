@@ -44,10 +44,14 @@ type streamParser struct {
 	body   []byte
 	parsed bool // finish() ran; body parsing is idempotent
 
-	model        string
-	inputTokens  int
-	outputTokens int
-	sawToken     bool // a generated-content token delta was observed
+	model       string
+	inputTokens int // aggregate regular input: OpenAI prompt_tokens;
+	//   Anthropic input_tokens + cache_creation_input_tokens.
+	cachedInputTokens int // OpenAI prompt_tokens_details.cached_tokens;
+	//   Anthropic cache_read_input_tokens.
+	outputTokens         int
+	sawToken             bool // a generated-content token delta was observed
+	openAIAggregateInput bool
 }
 
 func newStreamParser(contentType string) *streamParser {
@@ -160,10 +164,15 @@ type probe struct {
 }
 
 type usage struct {
-	InputTokens      int `json:"input_tokens"`
-	OutputTokens     int `json:"output_tokens"`
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	InputTokens          int `json:"input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+	PromptTokens         int `json:"prompt_tokens"`
+	CompletionTokens     int `json:"completion_tokens"`
+	CacheReadInputTokens int `json:"cache_read_input_tokens"`     // Anthropic
+	CacheCreationInput   int `json:"cache_creation_input_tokens"` // Anthropic
+	PromptTokensDetails  *struct {
+		CachedTokens int `json:"cached_tokens"` // OpenAI
+	} `json:"prompt_tokens_details"`
 }
 
 func payloadProbe(payload []byte) probe {
@@ -179,18 +188,12 @@ func (p *streamParser) observe(pr probe) {
 		if pr.Message.Model != "" {
 			p.model = pr.Message.Model
 		}
-		if u := pr.Message.Usage; u != nil {
-			p.inputTokens = max(p.inputTokens, u.InputTokens)
-			p.outputTokens = max(p.outputTokens, u.OutputTokens)
-		}
+		p.observeUsage(pr.Message.Usage)
 	}
 	if pr.Model != "" {
 		p.model = pr.Model
 	}
-	if u := pr.Usage; u != nil {
-		p.inputTokens = max(p.inputTokens, u.InputTokens, u.PromptTokens)
-		p.outputTokens = max(p.outputTokens, u.OutputTokens, u.CompletionTokens)
-	}
+	p.observeUsage(pr.Usage)
 	switch {
 	case len(pr.Choices) > 0 &&
 		(pr.Choices[0].Delta.Content != "" || pr.Choices[0].Delta.ReasoningContent != ""):
@@ -206,4 +209,39 @@ func (p *streamParser) observe(pr probe) {
 		// falls back to total latency.
 		p.sawToken = true
 	}
+}
+
+// observeUsage folds token accounting from either API dialect.
+//
+// OpenAI: prompt_tokens is the aggregate input. Cached tokens come from
+// prompt_tokens_details.cached_tokens; regular input is aggregate minus
+// cached (cache-write tokens stay at the regular rate).
+//
+// Anthropic: input_tokens is the base. Regular input is input_tokens plus
+// cache_creation_input_tokens (cache writes bill at the regular rate);
+// cached input is cache_read_input_tokens.
+func (p *streamParser) observeUsage(u *usage) {
+	if u == nil {
+		return
+	}
+	if u.PromptTokens > 0 {
+		// OpenAI shape: prompt_tokens is the aggregate input.
+		p.inputTokens = max(p.inputTokens, u.PromptTokens)
+		p.openAIAggregateInput = true
+		if u.PromptTokensDetails != nil {
+			p.cachedInputTokens = max(p.cachedInputTokens, u.PromptTokensDetails.CachedTokens)
+		}
+	} else {
+		// Anthropic shape: regular input includes cache creation.
+		p.inputTokens = max(p.inputTokens, u.InputTokens+u.CacheCreationInput)
+		p.cachedInputTokens = max(p.cachedInputTokens, u.CacheReadInputTokens)
+	}
+	p.outputTokens = max(p.outputTokens, u.OutputTokens, u.CompletionTokens)
+}
+
+func (p *streamParser) settleInputTokens() int {
+	if p.openAIAggregateInput {
+		return max(0, p.inputTokens-p.cachedInputTokens)
+	}
+	return p.inputTokens
 }

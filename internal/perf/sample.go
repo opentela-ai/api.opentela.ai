@@ -19,23 +19,30 @@ import (
 )
 
 // Sample is one completed (or aborted) proxied response.
+//
+// The token fields are normalized to the provider dialect before sampling.
+// For OpenAI, InputTokens is prompt_tokens and CachedInputTokens is
+// prompt_tokens_details.cached_tokens. For Anthropic, InputTokens is
+// input_tokens plus cache_creation_input_tokens (cache writes bill at the
+// regular rate) and CachedInputTokens is cache_read_input_tokens.
 type Sample struct {
-	TS            time.Time
-	Service       string // mesh service name, e.g. "llm"
-	Route         string // path tail routed to the worker, e.g. "chat/completions"
-	Model         string // model reported by the worker's response ("" if unseen)
-	PeerFP        string // hex sha256(peer id), truncated — never the raw id
-	GPUModel      string // normalized GPU name, "" when unresolvable
-	GPUCount      int
-	Status        int
-	ClientAbort   bool    // client disconnected before the upstream body ended
-	TTFTMs        float64 // request-write (else header-read) → first body byte
-	FirstTokenMs  float64 // streaming only; 0 when no content token was observed
-	TotalMs       float64 // request-write (else header-read) → body end
-	InputTokens   int
-	OutputTokens  int
-	ResponseBytes int64
-	GPUMs         int64 // worker-reported GPU time (X-Usage-Gpu-Ms); 0 if absent
+	TS                time.Time
+	Service           string // mesh service name, e.g. "llm"
+	Route             string // path tail routed to the worker, e.g. "chat/completions"
+	Model             string // model reported by the worker's response ("" if unseen)
+	PeerFP            string // hex sha256(peer id), truncated — never the raw id
+	GPUModel          string // normalized GPU name, "" when unresolvable
+	GPUCount          int
+	Status            int
+	ClientAbort       bool    // client disconnected before the upstream body ended
+	TTFTMs            float64 // request-write (else header-read) → first body byte
+	FirstTokenMs      float64 // streaming only; 0 when no content token was observed
+	TotalMs           float64 // request-write (else header-read) → body end
+	InputTokens       int     // billable regular input (dialect-normalized)
+	CachedInputTokens int     // cached tokens (dialect-normalized)
+	OutputTokens      int
+	ResponseBytes     int64
+	GPUMs             int64 // worker-reported GPU time (X-Usage-Gpu-Ms); 0 if absent
 }
 
 // Recorder accepts finished samples. Implementations must be safe for

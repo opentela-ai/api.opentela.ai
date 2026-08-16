@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opentela-ai/api/internal/billing"
 	"github.com/opentela-ai/api/internal/store"
 )
 
@@ -90,7 +91,7 @@ func TestHandlerLeaksNoPeerDetail(t *testing.T) {
 
 	target, _ := url.Parse(upstream.URL)
 	rec := httptest.NewRecorder()
-	New(target, time.Minute).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	NewWithPolicies(target, time.Minute, policyStoreStub{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
@@ -121,7 +122,7 @@ func TestHandlerCachesUpstream(t *testing.T) {
 	defer upstream.Close()
 
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 	for range 3 {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
@@ -142,7 +143,7 @@ func TestHandlerReportsUpstreamFailure(t *testing.T) {
 
 	target, _ := url.Parse(upstream.URL)
 	rec := httptest.NewRecorder()
-	New(target, time.Minute).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	NewWithPolicies(target, time.Minute, policyStoreStub{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("code = %d, want 502", rec.Code)
@@ -159,6 +160,10 @@ func (p policyStoreStub) ListManagedInstancesByPeerIDs(context.Context, []string
 		return nil, p.err
 	}
 	return p.managed, nil
+}
+
+func billableInstance(peerID string) store.InstanceInfo {
+	return store.InstanceInfo{PeerID: peerID, AccountID: "acct-" + peerID, OwnerWallet: "wallet-" + peerID}
 }
 
 func TestHandlerFiltersManagedMixedPeerToPermissionlessBindingsOnly(t *testing.T) {
@@ -212,6 +217,23 @@ func TestHandlerFailsClosedWhenPolicyLookupFails(t *testing.T) {
 	}
 }
 
+// A nil policy store must fail closed rather than serving unfiltered mesh
+// data. This is the security guarantee behind removing the bare New()
+// constructor: trusted-region services must never leak into the public
+// catalogue when classification is indeterminate.
+func TestHandlerFailsClosedWhenPolicyIsNil(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(tableJSON))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	rec := httptest.NewRecorder()
+	NewWithPolicies(target, time.Minute, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d, want 503 (fail closed on nil policy)", rec.Code)
+	}
+}
+
 // GET /v1/service/{service}/v1/models reshapes the catalogue into the
 // OpenAI list contract. The table offers two models on the "llm" service;
 // both must appear, deduped and sorted, with the OpenAI object/owner shape.
@@ -221,7 +243,7 @@ func TestServeModelsOpenAIShape(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/service/llm/v1/models", nil)
 	req.SetPathValue("service", "llm")
@@ -265,7 +287,7 @@ func TestServeModelsCatchAllIsEmpty(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/service/flash-sandbox/v1/models", nil)
 	req.SetPathValue("service", "flash-sandbox")
@@ -291,7 +313,7 @@ func TestServeModelsUnknownServiceIsEmpty(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/service/does-not-exist/v1/models", nil)
 	req.SetPathValue("service", "does-not-exist")
@@ -318,7 +340,7 @@ func TestServeCatalogueStillServedWithoutServicePathValue(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
@@ -345,7 +367,7 @@ func TestServeModelsSharesUpstreamCache(t *testing.T) {
 	}))
 	defer upstream.Close()
 	target, _ := url.Parse(upstream.URL)
-	h := New(target, time.Minute)
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{})
 
 	for range 3 {
 		req := httptest.NewRequest(http.MethodGet, "/v1/service/llm/v1/models", nil)
@@ -358,5 +380,199 @@ func TestServeModelsSharesUpstreamCache(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Fatalf("upstream hits=%d, want 1 (cached across both routes)", hits)
+	}
+}
+
+// askStub is a minimal AskSource returning a fixed slice per (service, model).
+type askStub struct {
+	byKey map[string][]billing.Ask
+	err   error
+	calls int
+}
+
+func (s *askStub) LiveAsks(_ context.Context, service, model string, _ time.Time) ([]billing.Ask, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.byKey[service+"\x00"+model], nil
+}
+
+func TestMarketOmittedWithoutAskSource(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(tableJSON))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	rec := httptest.NewRecorder()
+	NewWithPolicies(target, time.Minute, policyStoreStub{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	var got Response
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got.Market != nil {
+		t.Fatalf("market = %+v, want nil when no ask source wired", got.Market)
+	}
+}
+
+func TestMarketReportsMinMedianMaxPerModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+		  "p1": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]},
+		  "p2": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]},
+		  "p3": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]}
+		}`))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	now := time.Now().Add(time.Hour) // far future so nothing is "expired"
+	asks := &askStub{byKey: map[string][]billing.Ask{
+		"llm\x00Llama-3": {
+			{PeerID: "p1", Service: "llm", Model: "Llama-3", InputPerMillion: 1000, CachedInputPerMillion: 200, OutputPerMillion: 3000, ExpiresAt: now},
+			{PeerID: "p2", Service: "llm", Model: "Llama-3", InputPerMillion: 1500, CachedInputPerMillion: 300, OutputPerMillion: 4500, ExpiresAt: now},
+			{PeerID: "p3", Service: "llm", Model: "Llama-3", InputPerMillion: 1200, CachedInputPerMillion: 250, OutputPerMillion: 3600, ExpiresAt: now},
+		},
+	}}
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{managed: []store.InstanceInfo{
+		billableInstance("p1"),
+		billableInstance("p2"),
+		billableInstance("p3"),
+	}}).WithAsks(asks)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Market) == 0 {
+		t.Fatalf("market empty; services=%+v", got.Services)
+	}
+	var entry *MarketEntry
+	for i := range got.Market {
+		if got.Market[i].Model == "Llama-3" {
+			entry = &got.Market[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("Llama-3 market entry missing: %+v", got.Market)
+	}
+	if entry.Quoters != 3 {
+		t.Fatalf("quoters=%d, want 3", entry.Quoters)
+	}
+	if entry.Input.Min != 1000 || entry.Input.Median != 1200 || entry.Input.Max != 1500 {
+		t.Fatalf("input triple=%+v, want {1000,1200,1500}", entry.Input)
+	}
+	// median of [200,250,300] = 250
+	if entry.CachedInput.Median != 250 || entry.CachedInput.Min != 200 || entry.CachedInput.Max != 300 {
+		t.Fatalf("cached triple=%+v", entry.CachedInput)
+	}
+	// median of even-length [3000,3600,4500] sorted = 3600 (n=3 odd)
+	if entry.Output.Median != 3600 {
+		t.Fatalf("output median=%d, want 3600", entry.Output.Median)
+	}
+}
+
+func TestMarketDropsExpiredQuotesAndShowsUnpriced(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+		  "p1": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]}
+		}`))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	past := time.Now().Add(-time.Hour)
+	asks := &askStub{byKey: map[string][]billing.Ask{
+		"llm\x00Llama-3": {
+			{PeerID: "p1", Service: "llm", Model: "Llama-3", InputPerMillion: 1000, CachedInputPerMillion: 200, OutputPerMillion: 3000, ExpiresAt: past},
+		},
+	}}
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{managed: []store.InstanceInfo{
+		billableInstance("p1"),
+	}}).WithAsks(asks)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	var got Response
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	var entry *MarketEntry
+	for i := range got.Market {
+		if got.Market[i].Model == "Llama-3" {
+			entry = &got.Market[i]
+		}
+	}
+	if entry == nil {
+		t.Fatalf("unpriced model should still appear with quoters=0: %+v", got.Market)
+	}
+	if entry.Quoters != 0 {
+		t.Fatalf("quoters=%d, want 0 (single quote expired)", entry.Quoters)
+	}
+	if entry.Input.Min != 0 || entry.Input.Max != 0 {
+		t.Fatalf("expired quote should yield zeroed triple: %+v", entry.Input)
+	}
+}
+
+func TestMarketPropagatesAskError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(tableJSON))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	asks := &askStub{err: errors.New("store down")}
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{}).WithAsks(asks)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d, want 503 on ask source error", rec.Code)
+	}
+}
+
+func TestMarketDropsAsksOutsideCurrentBillableSnapshot(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+		  "p1": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]},
+		  "p2": {"connected": true, "service": [{"name":"llm","identity_group":["model=Llama-3"]}]},
+		  "p3": {"connected": true, "service": [{"name":"llm","identity_group":["model=Qwen/Qwen3-8B"]}]}
+		}`))
+	}))
+	defer upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	now := time.Now().Add(time.Hour)
+	asks := &askStub{byKey: map[string][]billing.Ask{
+		"llm\x00Llama-3": {
+			{PeerID: "p1", Service: "llm", Model: "Llama-3", InputPerMillion: 1000, CachedInputPerMillion: 200, OutputPerMillion: 3000, ExpiresAt: now},
+			{PeerID: "p2", Service: "llm", Model: "Llama-3", InputPerMillion: 10, CachedInputPerMillion: 10, OutputPerMillion: 10, ExpiresAt: now},
+			{PeerID: "p3", Service: "llm", Model: "Llama-3", InputPerMillion: 9999, CachedInputPerMillion: 9999, OutputPerMillion: 9999, ExpiresAt: now},
+			{PeerID: "missing", Service: "llm", Model: "Llama-3", InputPerMillion: 1, CachedInputPerMillion: 1, OutputPerMillion: 1, ExpiresAt: now},
+		},
+	}}
+	h := NewWithPolicies(target, time.Minute, policyStoreStub{managed: []store.InstanceInfo{
+		billableInstance("p1"),
+		billableInstance("p3"),
+	}}).WithAsks(asks)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/services", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var entry *MarketEntry
+	for i := range got.Market {
+		if got.Market[i].Service == "llm" && got.Market[i].Model == "Llama-3" {
+			entry = &got.Market[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatalf("Llama-3 market entry missing: %+v", got.Market)
+	}
+	if entry.Quoters != 1 {
+		t.Fatalf("quoters=%d, want 1 after snapshot intersection", entry.Quoters)
+	}
+	if entry.Input.Min != 1000 || entry.Input.Median != 1000 || entry.Input.Max != 1000 {
+		t.Fatalf("input triple=%+v, want only p1 retained", entry.Input)
 	}
 }

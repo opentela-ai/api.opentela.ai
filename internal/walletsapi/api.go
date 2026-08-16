@@ -3,6 +3,7 @@ package walletsapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -20,8 +21,10 @@ const (
 
 type Service struct {
 	store          walletStore
+	reconciler     Reconciler
 	identityMaxAge time.Duration
 	now            func() time.Time
+	logf           func(format string, args ...any)
 }
 
 type walletResponse struct {
@@ -56,8 +59,25 @@ type walletStore interface {
 	GetUserWalletSet(ctx context.Context, accountID string) ([]string, error)
 }
 
+// Reconciler credits a wallet's previously-unassigned deposits once it is
+// linked. The deposit watcher records transfers from unknown wallets as
+// 'unassigned'; this hook, invoked right after LinkWallet with the just-
+// linked accountID, sweeps them into the account so users are credited for
+// deposits sent before linking. It is optional: when nil, unassigned
+// deposits remain pending until a later manual reconciliation.
+type Reconciler interface {
+	ReconcileDepositsForWallet(ctx context.Context, wallet, accountID string) (int, error)
+}
+
 func New(store walletStore, identityMaxAge time.Duration) *Service {
-	return &Service{store: store, identityMaxAge: identityMaxAge, now: time.Now}
+	return &Service{store: store, identityMaxAge: identityMaxAge, now: time.Now, logf: log.Printf}
+}
+
+// WithReconciler installs a deposit reconciler (Step 5) so newly-linked
+// wallets are credited for pre-linkage deposits. Chainable; nil is a no-op.
+func (s *Service) WithReconciler(r Reconciler) *Service {
+	s.reconciler = r
+	return s
 }
 
 func (s *Service) Routes() http.Handler {
@@ -182,6 +202,19 @@ func (s *Service) handleLink(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		}
 		return
+	}
+	// Step 5: credit any deposits this wallet received before it was linked.
+	// The link itself already succeeded, so reconciliation failures are
+	// logged and never reported to the user — a later poll or retry settles
+	// them. Reconciliation runs in the request context so it is canceled if
+	// the client disconnects; a subsequent deposit watcher poll or a retry
+	// on the next link attempt picks up anything left uncredited.
+	if s.reconciler != nil {
+		if n, rerr := s.reconciler.ReconcileDepositsForWallet(r.Context(), ch.Wallet, userID); rerr != nil {
+			s.logf("reconcile deposits for %s: %v", ch.Wallet, rerr)
+		} else if n > 0 {
+			s.logf("credited %d pre-linkage deposit(s) to %s", n, ch.Wallet)
+		}
 	}
 	httputil.WriteJSON(w, http.StatusCreated, walletResponse{
 		ID: info.ID, Wallet: info.Wallet, Primary: info.Primary, CreatedAt: info.CreatedAt,
