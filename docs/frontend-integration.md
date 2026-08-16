@@ -73,13 +73,14 @@ calls will fail** (CORS error or `401`).
    neon neon-auth domain allow-localhost      # for local dev
    ```
 
-3. **JWT issuer — already set (verified).** The backend verifies the JWT's `iss`
-   exactly against `NEON_AUTH_ISSUER`, which is
-   `https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech` — the
-   **host only, not** the `/neondb/auth` path. (Better Auth sets `iss`/`aud` to the
-   host; the `/neondb/auth` base is only where the auth *endpoints* live, i.e.
-   `NEON_AUTH_BASE_URL` / `VITE_NEON_AUTH_URL`.) Confirmed end-to-end with a real
-   token, so no action needed unless Neon rotates the auth host.
+3. **JWT issuer — set this on the backend.** The backend verifies the JWT's `iss`
+   exactly against `NEON_AUTH_ISSUER`, which is the Neon Auth **host only, not**
+   the `/neondb/auth` path (Better Auth sets `iss`/`aud` to the host; the
+   `/neondb/auth` base is only where the auth *endpoints* live, i.e.
+   `NEXT_PUBLIC_NEON_AUTH_URL` / `NEON_AUTH_BASE_URL`). After Neon rotates the
+   auth host, set both `NEON_AUTH_ISSUER` (host only) and `NEON_AUTH_JWKS_URL`
+   (the `…/neondb/auth/.well-known/jwks.json` endpoint) to the new host, and
+   confirm the `iss` of a real token issued by the new instance matches.
 
 ---
 
@@ -93,8 +94,12 @@ in the frontend per the Neon quick-start
   (`@neondatabase/auth-ui`).
 - Point the client at the Neon Auth base URL:
   ```
-  VITE_NEON_AUTH_URL=https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech/neondb/auth
+  NEXT_PUBLIC_NEON_AUTH_URL=https://ep-empty-water-b13qhokv.neonauth.c-5.eu-central-1.aws.neon.tech/neondb/auth
   ```
+  (empty = account sign-in is disabled on that deployment). This is a
+  `NEXT_PUBLIC_*` var, so Next.js inlines it **at build time**; it must be
+  present in the build/deploy environment when `npm run deploy` runs, not just
+  as a Cloudflare Worker runtime var.
 - Render Neon Auth's sign-in UI (`<AuthView pathname="sign-in" />` inside
   `<NeonAuthUIProvider authClient={authClient}>`), or build your own with the
   client's auth methods.
@@ -453,7 +458,7 @@ endpoints directly. The request must carry an `Origin` header matching a trusted
 domain (prereq #2), e.g. `http://localhost:3000`:
 
 ```bash
-BASE="https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech/neondb/auth"
+BASE="https://ep-empty-water-b13qhokv.neonauth.c-5.eu-central-1.aws.neon.tech/neondb/auth"
 JAR=$(mktemp)
 
 # 1. Create a user once (or POST /sign-in/email for an existing one):
@@ -468,5 +473,5 @@ curl -sS -b "$JAR" -H 'Origin: http://localhost:3000' "$BASE/token"
 
 Send that `token` as `Authorization: Bearer <token>` to `/manage/keys`. In the
 app, `authClient.token()` returns the same thing. The token's `iss`/`aud` is the
-**host** `https://ep-old-cake-as4scnxq.neonauth.c-4.eu-central-1.aws.neon.tech`
+**host** `https://ep-empty-water-b13qhokv.neonauth.c-5.eu-central-1.aws.neon.tech`
 and `sub` is the Neon Auth user id (the key owner).
