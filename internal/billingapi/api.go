@@ -282,6 +282,20 @@ func (s *Service) handleState(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Off mode: serve a zero-cost "off" payload without touching the billing
+	// tables. The management route is always mounted (so the wallet page gets
+	// a graceful state instead of a 404), but no balances are tracked and no
+	// rows are written until billing is enabled with BILLING_MODE.
+	if s.mode == config.BillingOff {
+		httputil.WriteJSON(w, http.StatusOK, stateResponse{
+			Mode:               string(s.mode),
+			Balance:            balanceJSON{UpdatedAt: s.now()},
+			Caps:               capsJSON{},
+			Deposits:           depositInstr{Enabled: false},
+			WithdrawalsEnabled: false,
+		})
+		return
+	}
 	if err := s.store.EnsureAccountCredit(r.Context(), accountID); err != nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return

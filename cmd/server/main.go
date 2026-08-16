@@ -99,10 +99,17 @@ func run() error {
 		if cfg.BillingMode != config.BillingOff {
 			ws = ws.WithReconciler(depositReconciler{pg})
 		}
-		var billingRoutes manageapi.BillingRoutes
+		// The /manage/billing management endpoint is always mounted, even when
+		// billing is off, so the wallet page can render a graceful "off" state
+		// instead of a 404. The Service returns a zero-cost payload without
+		// touching the billing tables in that mode. The treasury ATA, the
+		// withdrawal flag, and — below — the billing gate, deposit watcher, and
+		// withdrawal worker remain opt-in: only the management route is
+		// unconditional.
+		var treasuryATA string
+		var withdrawalsEnabled bool
 		if cfg.BillingMode != config.BillingOff {
-			withdrawalsEnabled := cfg.BillingTreasuryKeypair != nil
-			var treasuryATA string
+			withdrawalsEnabled = cfg.BillingTreasuryKeypair != nil
 			if cfg.BillingTreasuryWallet != "" {
 				owner, err := solana.DecodeBase58(cfg.BillingTreasuryWallet, solana.PublicKeyBytes)
 				if err != nil {
@@ -122,9 +129,9 @@ func run() error {
 				}
 				treasuryATA = solana.EncodeBase58(ata)
 			}
-			billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled)
-			log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
 		}
+		billingRoutes := billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled)
+		log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
 		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
 	}

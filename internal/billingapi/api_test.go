@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,6 +204,48 @@ func TestGetStateDepositsDisabledWhenOff(t *testing.T) {
 	}
 	if got.WithdrawalsEnabled {
 		t.Fatalf("withdrawals_enabled must be false, got %+v", got)
+	}
+}
+
+// TestGetStateOffModeIsZeroCost verifies that an off-mode GET /manage/billing
+// (the management route is always mounted) returns a synthetic 200 payload
+// WITHOUT touching the billing store. Sentinel errors on every store method
+// prove the store is never consulted, so an off-mode deployment never writes
+// an account_credit row just because a user opened the wallet page.
+func TestGetStateOffModeIsZeroCost(t *testing.T) {
+	st := &stubStore{
+		ensureErr:  errors.New("EnsureAccountCredit must not be called in off mode"),
+		creditErr:  errors.New("AccountCredit must not be called in off mode"),
+		primaryErr: errors.New("PrimaryWalletForAccount must not be called in off mode"),
+	}
+	svc := New(st, config.BillingOff, "", "", "", 0, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	authed(t, svc, "acct-1").ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s (off-mode GET must not touch the store)", rec.Code, rec.Body.String())
+	}
+	var got stateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode != "off" {
+		t.Fatalf("mode=%q want off", got.Mode)
+	}
+	if got.Balance.CreditRaw != 0 || got.Balance.ReservedRaw != 0 || got.Balance.AvailableRaw != 0 {
+		t.Fatalf("balance must be zero in off mode, got %+v", got.Balance)
+	}
+	if got.Deposits.Enabled {
+		t.Fatalf("deposits must be disabled in off mode")
+	}
+	if got.WithdrawalsEnabled {
+		t.Fatalf("withdrawals must be disabled in off mode")
+	}
+	if got.PrimaryLinkedWallet != nil {
+		t.Fatalf("primary_linked_wallet must be null in off mode, got %q", *got.PrimaryLinkedWallet)
 	}
 }
 

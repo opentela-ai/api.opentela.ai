@@ -909,9 +909,12 @@ When `BILLING_MODE != off`:
    the raw proxy on the catch-all `/` route; the pricing handler is mounted
    at `/internal/pricing`.
 
-When `BILLING_MODE == off`, none of this is constructed — the proxy is the
+When `BILLING_MODE == off`, none of the above is constructed — the proxy is the
 raw `proxy.NewWithPerfHook(...)`, and behavior is identical to before billing
-existed.
+existed. The `/manage/billing` **management** route is the one exception: it
+is always mounted (even in off mode) and serves a zero-cost `{"mode":"off", ...}`
+payload without touching the billing tables, so the wallet page can render a
+graceful "not enabled" state instead of a 404.
 
 ---
 
