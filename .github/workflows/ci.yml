@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build, vet & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - run: go build ./...
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      # Hermetic unit tests. Packages with Postgres integration tests
+      # (internal/store, internal/billingapi) self-skip without
+      # TEST_DATABASE_URL; the integration job below runs them for real.
+      - run: go test -race ./...
+
+  integration:
+    name: Postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: otela
+          POSTGRES_PASSWORD: otela
+          POSTGRES_DB: otela_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U otela -d otela_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://otela:otela@localhost:5432/otela_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      # The store/billingapi helpers glob ../../migrations/*.sql, which
+      # resolves to the repo root because `go test` chdirs into each package.
+      - run: go test -race ./internal/store/... ./internal/billingapi/...

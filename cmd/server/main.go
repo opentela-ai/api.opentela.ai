@@ -350,10 +350,17 @@ func run() error {
 	}
 }
 
+// serviceCatalog is the subset of *catalog.Handler that catalogAllowlist
+// reads. Defined as a local interface so the adapter (and its tests) need
+// neither a live upstream mesh nor the catalog package's caching internals.
+type serviceCatalog interface {
+	ServicesForPricing(ctx context.Context) ([]catalog.Service, error)
+}
+
 // catalogAllowlist builds the seller-pricing allowlist from the shared catalog
 // handler's distilled service list. It converts []catalog.Service →
 // []pricingapi.AllowEntry so the pricing package has no catalog dependency.
-func catalogAllowlist(c *catalog.Handler) pricingapi.Allowlist {
+func catalogAllowlist(c serviceCatalog) pricingapi.Allowlist {
 	return pricingapi.CatalogAllowlist(func(ctx context.Context) ([]pricingapi.AllowEntry, error) {
 		services, err := c.ServicesForPricing(ctx)
 		if err != nil {
@@ -367,11 +374,22 @@ func catalogAllowlist(c *catalog.Handler) pricingapi.Allowlist {
 	})
 }
 
-// depositReconciler adapts *store.Postgres.ReconcileDepositsForWallet
+var _ serviceCatalog = (*catalog.Handler)(nil)
+
+// depositReconcilerStore is the subset of *store.Postgres used to reconcile
+// deposits. Defined as a local interface so the adapter (and its tests) need
+// no live Postgres.
+type depositReconcilerStore interface {
+	ReconcileDepositsForWallet(ctx context.Context, wallet, accountID string, now time.Time) (int, error)
+}
+
+// depositReconciler adapts depositReconcilerStore.ReconcileDepositsForWallet
 // (which takes an explicit now for deterministic tests) to the
 // walletsapi.Reconciler interface, supplying the current time.
-type depositReconciler struct{ s *store.Postgres }
+type depositReconciler struct{ s depositReconcilerStore }
 
 func (a depositReconciler) ReconcileDepositsForWallet(ctx context.Context, wallet, accountID string) (int, error) {
 	return a.s.ReconcileDepositsForWallet(ctx, wallet, accountID, time.Now().UTC())
 }
+
+var _ depositReconcilerStore = (*store.Postgres)(nil)

@@ -57,9 +57,9 @@ func newTestStore(t *testing.T) *store.Postgres {
 	// when `go test` runs them in parallel. We create it once (best effort;
 	// ignore "already exists") via a maintenance connection to `postgres`.
 	var apiDSN string
-	if base, name, ok := splitDatabaseName(dsn); ok {
-		apiDSN = base + name + "_api"
-		if admin, err := store.NewPostgres(ctx, base+"postgres"); err == nil {
+	if base, name, query, ok := splitDatabaseName(dsn); ok {
+		apiDSN = base + name + "_api" + query
+		if admin, err := store.NewPostgres(ctx, base+"postgres"+query); err == nil {
 			_ = admin.Migrate(ctx, "CREATE DATABASE "+name+"_api;")
 			admin.Close()
 		}
@@ -74,28 +74,10 @@ func newTestStore(t *testing.T) *store.Postgres {
 	}
 	t.Cleanup(p.Close)
 	if err := p.Migrate(ctx, `
-		DROP TABLE IF EXISTS withdrawals;
-		DROP TABLE IF EXISTS deposit_events;
-		DROP TABLE IF EXISTS credit_ledger;
-		DROP TABLE IF EXISTS billing_requests;
-		DROP TABLE IF EXISTS peer_asks;
-		DROP TABLE IF EXISTS account_credits;
-		DROP TABLE IF EXISTS node_credential_challenges;
-		DROP TABLE IF EXISTS instance_service_acl_rules;
-		DROP TABLE IF EXISTS instance_services;
-		DROP TABLE IF EXISTS trusted_region_membership_events;
-		DROP TABLE IF EXISTS trusted_region_invitations;
-		DROP TABLE IF EXISTS trusted_region_memberships;
-		DROP TABLE IF EXISTS trusted_regions;
-		DROP TABLE IF EXISTS instance_acl_rules;
-		DROP TABLE IF EXISTS instances;
-		DROP TABLE IF EXISTS wallet_challenges;
-		DROP TABLE IF EXISTS user_wallets;
-		DROP TABLE IF EXISTS account_identities;
-		DROP TABLE IF EXISTS api_keys;
-		DROP TABLE IF EXISTS faucet_claims;
+		DROP SCHEMA IF EXISTS public CASCADE;
+		CREATE SCHEMA public;
 	`); err != nil {
-		t.Fatalf("drop: %v", err)
+		t.Fatalf("reset schema: %v", err)
 	}
 	files, err := filepath.Glob("../../migrations/*.sql")
 	if err != nil {
@@ -117,12 +99,22 @@ func newTestStore(t *testing.T) *store.Postgres {
 // splitDatabaseName splits a libpq URL DSN at its trailing path segment
 // (the database name) and returns (prefix, name, ok). prefix includes the
 // trailing slash. ok is false if the DSN has no path segment.
-func splitDatabaseName(dsn string) (string, string, bool) {
+// splitDatabaseName splits a Postgres DSN of the form
+// "postgres://user:pass@host:port/dbname?params" into the part up to and
+// including the final slash (without the query), the database name, and the
+// trailing query string. The query is returned separately so derived sibling
+// DSNs keep the same connection options (e.g. ?sslmode=disable); a query is
+// no longer treated as an unparseable name.
+func splitDatabaseName(dsn string) (base, name, query string, ok bool) {
 	idx := strings.LastIndex(dsn, "/")
-	if idx < 0 || strings.Contains(dsn[idx+1:], "?") {
-		return "", "", false
+	if idx < 0 {
+		return "", "", "", false
 	}
-	return dsn[:idx+1], dsn[idx+1:], true
+	tail := dsn[idx+1:]
+	if q := strings.Index(tail, "?"); q >= 0 {
+		return dsn[:idx+1], tail[:q], tail[q:], true
+	}
+	return dsn[:idx+1], tail, "", true
 }
 
 func TestDBStateAndPreferencesRoundTrip(t *testing.T) {

@@ -24,30 +24,16 @@ func newTestStore(t *testing.T) *Postgres {
 		t.Fatalf("NewPostgres: %v", err)
 	}
 	t.Cleanup(p.Close)
+	// Reset the whole public schema so each test starts from a truly empty
+	// database regardless of FK/sequence dependencies or leftover types. A
+	// cascaded schema drop avoids the "cannot drop ... other objects depend on
+	// it" failures that a per-table list cannot prevent, and re-applying the
+	// migrations then always succeeds because no residual types remain.
 	if err := p.Migrate(ctx, `
-		DROP TABLE IF EXISTS withdrawals;
-		DROP TABLE IF EXISTS deposit_cursors;
-		DROP TABLE IF EXISTS deposit_events;
-		DROP TABLE IF EXISTS credit_ledger;
-		DROP TABLE IF EXISTS billing_requests;
-		DROP TABLE IF EXISTS peer_asks;
-		DROP TABLE IF EXISTS account_credits;
-		DROP TABLE IF EXISTS node_credential_challenges;
-		DROP TABLE IF EXISTS instance_service_acl_rules;
-		DROP TABLE IF EXISTS instance_services;
-		DROP TABLE IF EXISTS trusted_region_membership_events;
-		DROP TABLE IF EXISTS trusted_region_invitations;
-		DROP TABLE IF EXISTS trusted_region_memberships;
-		DROP TABLE IF EXISTS trusted_regions;
-		DROP TABLE IF EXISTS instance_acl_rules;
-		DROP TABLE IF EXISTS instances;
-		DROP TABLE IF EXISTS wallet_challenges;
-		DROP TABLE IF EXISTS user_wallets;
-		DROP TABLE IF EXISTS account_identities;
-		DROP TABLE IF EXISTS api_keys;
-		DROP TABLE IF EXISTS faucet_claims;
+		DROP SCHEMA IF EXISTS public CASCADE;
+		CREATE SCHEMA public;
 	`); err != nil {
-		t.Fatalf("drop: %v", err)
+		t.Fatalf("reset schema: %v", err)
 	}
 	files, err := filepath.Glob("../../migrations/*.sql")
 	if err != nil {
