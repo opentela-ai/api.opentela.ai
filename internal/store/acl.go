@@ -18,6 +18,7 @@ var (
 	ErrChallengeConsumed       = errors.New("store: challenge consumed")
 	ErrWalletInUse             = errors.New("store: wallet in use")
 	ErrWalletOtherAccount      = errors.New("store: wallet linked to another account")
+	ErrWalletAlreadyLinked     = errors.New("store: account already has a linked wallet")
 	ErrRegionMigrationConflict = errors.New("store: region migration blocked by existing bindings")
 )
 
@@ -292,30 +293,48 @@ func (p *Postgres) LinkWallet(ctx context.Context, accountID, wallet string) (Wa
 		return WalletInfo{}, fmt.Errorf("store: lock wallet account: %w", err)
 	}
 
-	var primary bool
-	err = tx.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM user_wallets WHERE account_id = $1 AND is_primary = TRUE)`, accountID).
-		Scan(&primary)
-	if err != nil {
-		return WalletInfo{}, fmt.Errorf("store: wallet primary existence: %w", err)
+	// Report the most specific error first: is the requested wallet already
+	// linked to another account? This distinguishes a taken wallet from the
+	// one-wallet-per-account rule checked below.
+	var owner string
+	err = tx.QueryRow(ctx, `SELECT account_id FROM user_wallets WHERE wallet = $1`, wallet).Scan(&owner)
+	switch {
+	case err == nil && owner != accountID:
+		return WalletInfo{}, ErrWalletOtherAccount
+	case err == nil: // owner == accountID: same wallet re-linked
+		return WalletInfo{}, ErrConflict
+	case !errors.Is(err, pgx.ErrNoRows):
+		return WalletInfo{}, fmt.Errorf("store: wallet owner lookup: %w", err)
 	}
-	shouldPrimary := !primary
 
+	// One OpenTela Cloud account operates a single linked wallet, and every
+	// peer it claims is owned by that wallet. A different wallet already
+	// linked here is ErrWalletAlreadyLinked; re-linking the same wallet was
+	// handled above as ErrConflict.
+	var existingWallet string
+	err = tx.QueryRow(ctx, `SELECT wallet FROM user_wallets WHERE account_id = $1`, accountID).Scan(&existingWallet)
+	switch {
+	case err == nil && existingWallet == wallet:
+		return WalletInfo{}, ErrConflict
+	case err == nil:
+		return WalletInfo{}, ErrWalletAlreadyLinked
+	case !errors.Is(err, pgx.ErrNoRows):
+		return WalletInfo{}, fmt.Errorf("store: existing wallet lookup: %w", err)
+	}
+
+	// With at most one wallet per account, the first (and only) link is the
+	// primary wallet used for faucet payouts and billing.
 	var out WalletInfo
 	err = tx.QueryRow(ctx, `
 		INSERT INTO user_wallets (account_id, wallet, is_primary)
-		VALUES ($1, $2, $3)
+		VALUES ($1, $2, TRUE)
 		ON CONFLICT (wallet) DO NOTHING
-		RETURNING id, created_at`, accountID, wallet, shouldPrimary).
+		RETURNING id, created_at`, accountID, wallet).
 		Scan(&out.ID, &out.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var owner string
-		if qErr := tx.QueryRow(ctx, `SELECT account_id FROM user_wallets WHERE wallet = $1`, wallet).Scan(&owner); qErr != nil {
-			return WalletInfo{}, fmt.Errorf("store: resolve wallet conflict: %w", qErr)
-		}
-		if owner == accountID {
-			return WalletInfo{}, ErrConflict
-		}
+		// ON CONFLICT(wallet) fired: this exact wallet is already linked to
+		// some account. The same-account case was ruled out above, so it must
+		// belong to another account.
 		return WalletInfo{}, ErrWalletOtherAccount
 	}
 	if err != nil {
@@ -323,7 +342,7 @@ func (p *Postgres) LinkWallet(ctx context.Context, accountID, wallet string) (Wa
 	}
 	out.AccountID = accountID
 	out.Wallet = wallet
-	out.Primary = shouldPrimary
+	out.Primary = true
 	if err := tx.Commit(ctx); err != nil {
 		return WalletInfo{}, fmt.Errorf("store: commit link wallet: %w", err)
 	}

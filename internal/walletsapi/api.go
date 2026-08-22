@@ -194,6 +194,8 @@ func (s *Service) handleLink(w http.ResponseWriter, r *http.Request) {
 	info, err := s.store.LinkWallet(r.Context(), userID, ch.Wallet)
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrWalletAlreadyLinked):
+			http.Error(w, "account already has a linked wallet; one account operates a single wallet for all its peers", http.StatusConflict)
 		case errors.Is(err, store.ErrWalletOtherAccount):
 			http.Error(w, "wallet already linked to another account", http.StatusConflict)
 		case errors.Is(err, store.ErrConflict):

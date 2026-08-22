@@ -232,3 +232,38 @@ func TestHandleLinkSucceedsEvenWhenReconcilerErrors(t *testing.T) {
 		t.Fatalf("code=%d body=%s, want 201 (reconciler error must not fail the link)", w.Code, w.Body.String())
 	}
 }
+
+// TestHandleLinkRejectsSecondWallet drives the full link path with a store
+// that returns ErrWalletAlreadyLinked (the account already operates a
+// wallet) and asserts the handler surfaces a clear 409, not a 5xx.
+func TestHandleLinkRejectsSecondWallet(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallet := solana.EncodeBase58(pub)
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	nonce, err := solana.NewChallengeNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "challenge-link-3"
+	message := solana.BuildChallengeMessage("user-alice", wallet, nonce, now, now.Add(challengeTTL))
+
+	store := &storeStub{
+		challenge: store.WalletChallenge{ID: id, AccountID: "user-alice", Wallet: wallet, Nonce: nonce, Message: message},
+		linkErr:   store.ErrWalletAlreadyLinked,
+	}
+	svc := New(store, time.Hour)
+	svc.now = func() time.Time { return now }
+
+	sig := ed25519.Sign(priv, []byte(message))
+	req := httptest.NewRequest(http.MethodPost, "/manage/wallets", bytes.NewBufferString(`{"challenge_id":"`+id+`","signature":"`+solana.EncodeBase58(sig)+`"}`))
+	req.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	authedRoutes(t, svc).ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("code=%d body=%s, want 409 (one wallet per account)", w.Code, w.Body.String())
+	}
+}

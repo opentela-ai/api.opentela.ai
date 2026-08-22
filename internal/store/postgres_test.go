@@ -149,16 +149,17 @@ func TestPostgresInstanceACLAndWalletLifecycle(t *testing.T) {
 	if err != nil || !alicePrimary.Primary {
 		t.Fatalf("LinkWallet(alice primary) = (%+v,%v), want primary", alicePrimary, err)
 	}
-	aliceBackup, err := p.LinkWallet(ctx, alice, "wallet-alice-backup")
-	if err != nil || aliceBackup.Primary {
-		t.Fatalf("LinkWallet(alice backup) = (%+v,%v), want non-primary", aliceBackup, err)
+	// One account operates a single wallet: a second, different wallet is
+	// rejected, and re-linking the same wallet is the existing conflict.
+	if _, err := p.LinkWallet(ctx, alice, "wallet-alice-backup"); !errors.Is(err, ErrWalletAlreadyLinked) {
+		t.Fatalf("LinkWallet(alice backup) err=%v, want ErrWalletAlreadyLinked", err)
+	}
+	if _, err := p.LinkWallet(ctx, alice, alicePrimary.Wallet); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate same-account wallet err=%v, want ErrConflict", err)
 	}
 	bobPrimary, err := p.LinkWallet(ctx, bob, "wallet-bob-primary")
 	if err != nil || !bobPrimary.Primary {
 		t.Fatalf("LinkWallet(bob primary) = (%+v,%v), want primary", bobPrimary, err)
-	}
-	if _, err := p.LinkWallet(ctx, alice, alicePrimary.Wallet); !errors.Is(err, ErrConflict) {
-		t.Fatalf("duplicate same-account wallet err=%v, want ErrConflict", err)
 	}
 	if _, err := p.LinkWallet(ctx, bob, alicePrimary.Wallet); !errors.Is(err, ErrWalletOtherAccount) {
 		t.Fatalf("cross-account wallet err=%v, want ErrWalletOtherAccount", err)
@@ -220,8 +221,8 @@ func TestPostgresInstanceACLAndWalletLifecycle(t *testing.T) {
 		t.Fatalf("DeleteWallet(released owner) = (%v,%v), want true,nil", changed, err)
 	}
 	aliceWallets, err := p.ListWalletsByUser(ctx, alice)
-	if err != nil || len(aliceWallets) != 1 || aliceWallets[0].ID != aliceBackup.ID || !aliceWallets[0].Primary {
-		t.Fatalf("Alice wallets after primary delete = (%+v,%v), want promoted backup", aliceWallets, err)
+	if err != nil || len(aliceWallets) != 0 {
+		t.Fatalf("Alice wallets after delete = (%+v,%v), want none (one wallet per account, nothing to promote)", aliceWallets, err)
 	}
 }
 

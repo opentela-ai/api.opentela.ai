@@ -349,14 +349,21 @@ Authorization: Bearer <neon-auth-jwt>
 
 ### Wallet endpoints
 
-- `GET /manage/wallets` lists the caller's verified linked wallets.
+Each OpenTela Cloud account operates a **single linked wallet**, and every
+peer it claims is owned by that wallet — one account, one wallet, many peers.
+A second, different wallet is rejected with `409`; unlinking the wallet is
+blocked with `409` while it still proves one of the account's claimed
+instances (release those instances first).
+
+- `GET /manage/wallets` lists the caller's verified linked wallet (at most one).
 - `POST /manage/wallets/challenges` accepts `{"wallet":"<base58>"}` and returns
   `{id,message,expires_at}` for a single-use five-minute challenge.
 - `POST /manage/wallets` accepts `{"challenge_id":"...","signature":"<base58>"}`.
   The signature must verify over the exact returned challenge message. Success
-  returns `201`. Replay/expired/already-linked wallets return `409`. Invalid
-  signatures return `422`.
-- `DELETE /manage/wallets/{id}` unlinks one of the caller's wallets. It returns
+  returns `201`. Replay/expired/already-linked wallets return `409`; an account
+  that already has a linked wallet also returns `409`. Invalid signatures return
+  `422`.
+- `DELETE /manage/wallets/{id}` unlinks the caller's wallet. It returns
   `409` while that wallet is still the ownership proof for one of the caller's
   claimed instances.
 
