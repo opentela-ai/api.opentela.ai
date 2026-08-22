@@ -1,7 +1,16 @@
 -- One OpenTela Cloud account operates a single linked wallet, and every peer
 -- it claims is owned by that wallet (see LinkWallet's one-wallet-per-account
--- enforcement in internal/store/acl.go). This migration hardens that rule in
--- the schema with a UNIQUE constraint on user_wallets(account_id).
+-- enforcement in internal/store/acl.go). This hardens the rule in the schema
+-- with a UNIQUE constraint on user_wallets(account_id).
+--
+-- Backward-compatible per the database-migration skill: this is a constraint
+-- addition only (no drops/renames). The previous app version keeps working
+-- against the new schema -- its normal first-wallet / claim / delete paths are
+-- unchanged; the only divergence is that a second-wallet link (already
+-- forbidden by the new code, and never used pre-launch) raises a unique
+-- violation instead of succeeding. The now-redundant partial index
+-- idx_user_wallets_primary is left in place so a rollback keeps that index
+-- available without re-running any migration.
 --
 -- Self-guarding: if any account currently has more than one wallet, this
 -- raises a clear exception naming them and applies nothing. The keyctl
@@ -22,10 +31,4 @@ BEGIN
 
     ALTER TABLE user_wallets
         ADD CONSTRAINT user_wallets_account_unique UNIQUE (account_id);
-
-    -- The per-account "one primary" partial index is now redundant: with at
-    -- most one wallet per account, that wallet is always primary. Drop the
-    -- partial index; the is_primary column stays (always true) so queries and
-    -- responses remain unchanged.
-    DROP INDEX IF EXISTS idx_user_wallets_primary;
 END $$;
