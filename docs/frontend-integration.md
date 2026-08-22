@@ -59,8 +59,10 @@ calls will fail** (CORS error or `401`).
    must be allow-listed. A single `CORS_ALLOWED_ORIGINS` allowlist governs both
    planes:
    ```bash
-   railway variables --set CORS_ALLOWED_ORIGINS="https://app.opentela.ai"
-   # multiple origins: comma-separated, e.g. "https://app.opentela.ai,http://localhost:5173"
+   # The account console is deployed at cloud.opentela.ai; app.opentela.ai
+   # is an additional allow-listed origin. Comma-separated, e.g.
+   #   "https://cloud.opentela.ai,https://app.opentela.ai,http://localhost:5173"
+   railway variables --set CORS_ALLOWED_ORIGINS="https://cloud.opentela.ai,https://app.opentela.ai"
    ```
    Setting this triggers a redeploy. With it unset, the API sends no
    `Access-Control-Allow-Origin` header and the browser blocks the response.
@@ -69,7 +71,7 @@ calls will fail** (CORS error or `401`).
 2. **Register the frontend domain with Neon Auth** (so login/redirects aren't
    rejected with `invalid domain`):
    ```bash
-   neon neon-auth domain add https://app.opentela.ai
+   neon neon-auth domain add https://cloud.opentela.ai
    neon neon-auth domain allow-localhost      # for local dev
    ```
 

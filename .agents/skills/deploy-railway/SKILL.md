@@ -35,7 +35,7 @@ railway variables --set \
   INTERNAL_CONTROL_TOKEN=<min 32 bytes>
 # optional, paired: NODE_CREDENTIAL_SIGNING_KID + NODE_CREDENTIAL_SIGNING_KEY
 railway variables            # list (add -k for KEY=value, --json for machine)
-railway variables -s <service> --set CORS_ALLOWED_ORIGINS="https://app.opentela.ai"
+railway variables -s <service> --set CORS_ALLOWED_ORIGINS="https://cloud.opentela.ai"
 ```
 
 Paired settings must be set together or the app refuses to start (see the
