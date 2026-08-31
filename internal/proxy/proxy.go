@@ -2,6 +2,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -28,7 +30,10 @@ var corsResponseHeaders = []string{
 // New returns a reverse proxy that forwards every request to target, preserving
 // method, path, query, headers, and body. Responses stream back immediately
 // (FlushInterval -1), which matters for opentela's SSE/LLM output. Upstream
-// failures produce a 502.
+// failures produce a 502; a client that disconnects mid-stream surfaces as
+// context.Canceled, which is ignored rather than logged as a 502 — the
+// connection is already closing and logging every cancel buries real
+// outages in noise.
 //
 // One deliberate exception to transparency: Anthropic Messages responses are
 // scanned for leaked reasoning-section markers and rewritten into proper
@@ -71,6 +76,14 @@ func NewWithPerfHook(target *url.URL, perfHook func(*http.Response) error) *http
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// A context.Canceled error means the downstream client went
+			// away (or the request was canceled on server shutdown) — not
+			// an upstream outage. The connection is already closing, so
+			// writing a 502 is pointless, and logging every cancel buries
+			// real failures. Leave response and logs untouched.
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			log.Printf("proxy: upstream error for %s %s: %v", r.Method, r.URL.Path, err)
 			w.WriteHeader(http.StatusBadGateway)
 		},

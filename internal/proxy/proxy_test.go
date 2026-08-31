@@ -2,7 +2,10 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -188,6 +191,49 @@ func TestProxyUpstreamDownReturns502(t *testing.T) {
 		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 }
+
+// A client that disconnects mid-stream surfaces to the error handler as
+// context.Canceled — the production proxy sees bursts of these from
+// abandoned sandbox exec/shell streams. It must NOT be turned into a 502
+// (the connection is already closing) and must not be logged, or real
+// upstream failures get buried. Contrast TestProxyUpstreamDownReturns502,
+// which still expects a 502 for an actual dial failure.
+func TestProxyClientCancelIsNot502(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"raw", context.Canceled},
+		{"url.Error-wrapped", &url.Error{Op: "Post", URL: "http://upstream.invalid/x", Err: context.Canceled}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			prevOut := log.Writer()
+			log.SetOutput(&logBuf)
+			defer log.SetOutput(prevOut)
+
+			target, _ := url.Parse("http://upstream.invalid")
+			p := New(target)
+			p.Transport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tc.err
+			})
+
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/service/flash-sandbox/sandboxes/x/exec", nil))
+
+			if rec.Code == http.StatusBadGateway {
+				t.Fatalf("client cancel returned 502; want it ignored (status %d)", rec.Code)
+			}
+			if logBuf.Len() != 0 {
+				t.Fatalf("client cancel logged (want silent):\n%s", logBuf.String())
+			}
+		})
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // The upstream sets its own permissive CORS headers. If they survive alongside
 // this service's, the browser sees two Access-Control-Allow-Origin values and
