@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,15 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.JanitorEvery != 1*time.Minute {
 		t.Errorf("JanitorEvery = %v, want 1m", cfg.JanitorEvery)
+	}
+	if cfg.BetterStackSourceToken != "" {
+		t.Errorf("BetterStackSourceToken = %q, want empty (Better Stack off by default)", cfg.BetterStackSourceToken)
+	}
+	if cfg.BetterStackLogLevel != slog.LevelInfo {
+		t.Errorf("BetterStackLogLevel = %v, want Info", cfg.BetterStackLogLevel)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
 	}
 }
 
@@ -567,5 +577,88 @@ func TestLoadWithdrawalKeypairBadBase64(t *testing.T) {
 	t.Setenv("BILLING_TREASURY_KEYPAIR", "!!not-base64!!")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load should reject a non-base64 keypair")
+	}
+}
+
+// Observability defaults: Better Stack is off, level INFO, stdout JSON. The
+// happy path below asserts that a valid token is carried through unchanged and
+// that the level/format overrides parse.
+func TestLoadObservabilityDefaults(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BETTERSTACK_SOURCE_TOKEN", "")
+	t.Setenv("BETTERSTACK_LOG_LEVEL", "")
+	t.Setenv("LOG_FORMAT", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.BetterStackSourceToken != "" {
+		t.Errorf("BetterStackSourceToken = %q, want empty", cfg.BetterStackSourceToken)
+	}
+	if cfg.BetterStackLogLevel != slog.LevelInfo {
+		t.Errorf("BetterStackLogLevel = %v, want Info", cfg.BetterStackLogLevel)
+	}
+	if cfg.LogFormat != "json" {
+		t.Errorf("LogFormat = %q, want json", cfg.LogFormat)
+	}
+}
+
+func TestLoadObservabilityOverrides(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BETTERSTACK_SOURCE_TOKEN", "a-very-long-source-token-value")
+	t.Setenv("BETTERSTACK_LOG_LEVEL", "warn")
+	t.Setenv("LOG_FORMAT", "text")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.BetterStackSourceToken != "a-very-long-source-token-value" {
+		t.Errorf("BetterStackSourceToken = %q, want carried through", cfg.BetterStackSourceToken)
+	}
+	if cfg.BetterStackLogLevel != slog.LevelWarn {
+		t.Errorf("BetterStackLogLevel = %v, want Warn", cfg.BetterStackLogLevel)
+	}
+	if cfg.LogFormat != "text" {
+		t.Errorf("LogFormat = %q, want text", cfg.LogFormat)
+	}
+}
+
+func TestLoadObservabilityRejectsShortToken(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BETTERSTACK_SOURCE_TOKEN", "short-token")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BETTERSTACK_SOURCE_TOKEN") {
+		t.Fatalf("Load() err = %v, want one mentioning BETTERSTACK_SOURCE_TOKEN", err)
+	}
+}
+
+func TestLoadObservabilityRejectsWhitespaceToken(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BETTERSTACK_SOURCE_TOKEN", "  0123456789012345  ")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BETTERSTACK_SOURCE_TOKEN") {
+		t.Fatalf("Load() err = %v, want one mentioning BETTERSTACK_SOURCE_TOKEN", err)
+	}
+}
+
+func TestLoadObservabilityRejectsBadLevel(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("BETTERSTACK_LOG_LEVEL", "verbose")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "BETTERSTACK_LOG_LEVEL") {
+		t.Fatalf("Load() err = %v, want one mentioning BETTERSTACK_LOG_LEVEL", err)
+	}
+}
+
+func TestLoadObservabilityRejectsBadFormat(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("LOG_FORMAT", "yaml")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LOG_FORMAT") {
+		t.Fatalf("Load() err = %v, want one mentioning LOG_FORMAT", err)
 	}
 }

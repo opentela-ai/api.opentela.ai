@@ -48,6 +48,26 @@ configured upstream.
 `CLICKHOUSE_USERNAME`/`CLICKHOUSE_PASSWORD` require `CLICKHOUSE_URL`.
 `TINYBIRD_APPEND_TOKEN` and `TINYBIRD_LEADERBOARD_TOKEN` must be set together.
 
+## Observability (Better Stack logs, optional)
+
+Structured logs (stdlib `log/slog`) are written to stdout as JSON and, when a
+Better Stack source token is set, also shipped to [Better Stack Logs](https://betterstack.com/logs)
+via [`github.com/samber/slog-betterstack`](https://github.com/samber/slog-betterstack)
+— the Better Stack Go integration. The logger is the single sink for the
+process: after `slog.SetDefault` is called at startup, the standard library's
+`log` package is routed through it, so existing `log.Printf` call sites across
+the codebase reach stdout and Better Stack with **no call-site changes**.
+
+| Variable                 | Required | Default | Purpose                              |
+|--------------------------|----------|---------|--------------------------------------|
+| `BETTERSTACK_SOURCE_TOKEN` | no    | —       | Better Stack source token (`$SOURCE_TOKEN`); enables shipping to Better Stack (minimum 16 bytes) |
+| `BETTERSTACK_LOG_LEVEL`  | no       | `info`  | Minimum record level for every sink (`debug`\|`info`\|`warn`\|`error`) |
+| `LOG_FORMAT`             | no       | `json`  | stdout record format (`json` or `text`); Better Stack always receives JSON |
+
+With no token the service writes JSON to stdout and makes no network calls.
+`BETTERSTACK_LOG_LEVEL` gates stdout as well as Better Stack — raising it
+above `info` silences the startup banners emitted through the `log` bridge.
+
 ## Run
 
 ```bash

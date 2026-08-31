@@ -4,6 +4,7 @@ package config
 import (
 	"crypto/ed25519"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strconv"
@@ -22,6 +23,18 @@ type Config struct {
 	CacheTTL     time.Duration
 	CacheNegTTL  time.Duration
 	JanitorEvery time.Duration
+
+	// Observability (optional). When BETTERSTACK_SOURCE_TOKEN is set,
+	// structured logs are also shipped to Better Stack Logs
+	// (https://betterstack.com/logs) via the slog-betterstack handler — the
+	// Better Stack Go integration. Without a token the service writes JSON
+	// to stdout only and makes no network calls. The log level gates every
+	// sink (stdout included), and LOG_FORMAT selects the stdout record
+	// format (json by default, text for local readability); Better Stack
+	// always receives a structured JSON payload. See internal/obs.
+	BetterStackSourceToken string
+	BetterStackLogLevel    slog.Level
+	LogFormat              string
 
 	// Key-management plane (optional). Enabled only when both NeonAuthJWKSURL and
 	// NeonAuthIssuer are set.
@@ -173,6 +186,27 @@ func Load() (*Config, error) {
 	janitor, err := durationEnv("CACHE_JANITOR_INTERVAL", 1*time.Minute)
 	if err != nil {
 		return nil, err
+	}
+
+	// Observability (optional). Better Stack ships only when a source token is
+	// set; everything else has a sensible default and is independent, so there
+	// are no paired-setting rules here.
+	betterStackToken := os.Getenv("BETTERSTACK_SOURCE_TOKEN")
+	if betterStackToken != "" {
+		if strings.TrimSpace(betterStackToken) != betterStackToken {
+			return nil, fmt.Errorf("BETTERSTACK_SOURCE_TOKEN must not contain surrounding whitespace")
+		}
+		if len(betterStackToken) < 16 {
+			return nil, fmt.Errorf("BETTERSTACK_SOURCE_TOKEN must be at least 16 bytes")
+		}
+	}
+	betterStackLevel, err := levelEnv("BETTERSTACK_LOG_LEVEL", slog.LevelInfo)
+	if err != nil {
+		return nil, err
+	}
+	logFormat := strings.ToLower(stringEnv("LOG_FORMAT", "json"))
+	if logFormat != "json" && logFormat != "text" {
+		return nil, fmt.Errorf("LOG_FORMAT must be one of json|text, got %q", logFormat)
 	}
 
 	jwksTTL, err := durationEnv("NEON_AUTH_JWKS_CACHE_TTL", time.Hour)
@@ -460,6 +494,10 @@ func Load() (*Config, error) {
 		CacheNegTTL:  negTTL,
 		JanitorEvery: janitor,
 
+		BetterStackSourceToken: betterStackToken,
+		BetterStackLogLevel:    betterStackLevel,
+		LogFormat:              logFormat,
+
 		NeonAuthJWKSURL:                jwksURL,
 		NeonAuthIssuer:                 issuer,
 		NeonAuthAudience:               os.Getenv("NEON_AUTH_AUDIENCE"),
@@ -592,4 +630,26 @@ func floatEnv(key string, def float64) (float64, error) {
 		return 0, fmt.Errorf("%s must be non-negative, got %q", key, v)
 	}
 	return f, nil
+}
+
+// levelEnv parses one of debug|info|warn|error (case-insensitive) into a
+// slog.Level, returning def when the variable is unset. An unrecognized value
+// is a hard error so a mistyped level is not silently swallowed.
+func levelEnv(key string, def slog.Level) (slog.Level, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	switch strings.ToLower(v) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("%s must be one of debug|info|warn|error, got %q", key, v)
+	}
 }

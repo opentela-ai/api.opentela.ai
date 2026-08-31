@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/libp2p/go-libp2p v0.47.0
+	github.com/samber/slog-betterstack v1.4.4
 )
 
 require (
@@ -25,6 +26,8 @@ require (
 	github.com/multiformats/go-multicodec v0.9.1 // indirect
 	github.com/multiformats/go-multihash v0.2.3 // indirect
 	github.com/multiformats/go-varint v0.0.7 // indirect
+	github.com/samber/lo v1.53.0 // indirect
+	github.com/samber/slog-common v0.21.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/exp v0.0.0-20250606033433-dcc06ee1d476 // indirect

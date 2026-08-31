@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os/signal"
 	"syscall"
@@ -27,6 +28,7 @@ import (
 	"github.com/opentela-ai/api/internal/mesh"
 	"github.com/opentela-ai/api/internal/neonauth"
 	"github.com/opentela-ai/api/internal/nodecred"
+	"github.com/opentela-ai/api/internal/obs"
 	"github.com/opentela-ai/api/internal/peers"
 	"github.com/opentela-ai/api/internal/perf"
 	"github.com/opentela-ai/api/internal/pricingapi"
@@ -54,6 +56,22 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+
+	// Observability is the first thing wired so every line below — and,
+	// via the standard library's log bridge, the existing log.Printf call
+	// sites across packages — reaches the configured sinks. slog.SetDefault
+	// also clears log flags and routes the stdlib log package through this
+	// logger, so legacy call sites emit INFO records on stdout and, when a
+	// Better Stack token is set, there too. No call site needs to change.
+	logger := obs.New(obs.Options{
+		Token:  cfg.BetterStackSourceToken,
+		Level:  cfg.BetterStackLogLevel,
+		Format: cfg.LogFormat,
+	})
+	slog.SetDefault(logger)
+	if cfg.BetterStackSourceToken != "" {
+		log.Printf("better stack shipping enabled (level %s)", cfg.BetterStackLogLevel)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
