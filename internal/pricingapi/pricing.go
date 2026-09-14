@@ -197,6 +197,15 @@ func (s *Service) observationFresh(obs mesh.PeerObservation) bool {
 // live advertisement so a peer cannot publish prices for routes it does not
 // currently serve.
 func (s *Service) validateAgainstObservation(asks []billing.Ask, services []mesh.ServiceObservation) error {
+	return ValidateAsksAgainstAdvertisement(asks, services)
+}
+
+// ValidateAsksAgainstAdvertisement is the shared publication rule: no more
+// than 256 asks, no empty (service, model) pairs, no duplicates, no negative
+// rates, and every route must be in the peer's own live advertisement. The
+// manage API reuses it for console-set seller pricing so both publication
+// paths enforce the same market contract.
+func ValidateAsksAgainstAdvertisement(asks []billing.Ask, services []mesh.ServiceObservation) error {
 	if len(asks) > 256 {
 		return errors.New("too many asks (max 256)")
 	}

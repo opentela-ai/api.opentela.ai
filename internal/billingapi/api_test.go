@@ -72,6 +72,20 @@ type stubStore struct {
 	indexOK    bool
 	indexErr   error
 	asksErr    error
+	// Console-managed pricing surface (model caps + ask config).
+	capsSheet    []billing.ModelCaps
+	capsSheetErr error
+	savedSheet   []billing.ModelCaps
+	capsIn       string // captured accountID
+	askCfg       map[string][]billing.Ask
+	cfgErr       error
+	savedPeer    string
+	savedAsks    []billing.Ask
+	instByPeer   map[string]store.InstanceInfo
+	instErr      error
+	published    map[string][]billing.Ask // ReplaceAsks captures
+	publishTTL   time.Duration
+	publishErr   error
 }
 
 func (s *stubStore) ListInstancesByUser(_ context.Context, accountID string) ([]store.InstanceInfo, error) {
