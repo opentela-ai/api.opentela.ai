@@ -148,6 +148,17 @@ type Config struct {
 	BillingTreasuryKeypair         ed25519.PrivateKey
 	BillingWithdrawPollInterval    time.Duration
 	BillingWithdrawBlockhashMaxAge time.Duration
+
+	// Delegations (Phase 2, design §11). BillingSettlementAuthority is the
+	// base58 pubkey of the settlement authority — the delegate every buyer
+	// names in their SPL approve. When set (and billing is on), the allowance
+	// poller re-reads each linked wallet's ATA delegated amount every
+	// BILLING_ALLOWANCE_REFRESH and mirrors grants/revocations into the
+	// registry, so the reserve gate's min(credit, Σ allowance) bound tracks
+	// the chain. Unset = delegation disabled; the custodial deposit rail
+	// alone backs spend.
+	BillingSettlementAuthority string
+	BillingAllowanceRefresh    time.Duration
 }
 
 // BillingMode selects the off-chain billing posture for the inference proxy.
@@ -489,6 +500,25 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Delegations (Phase 2, §11). BILLING_SETTLEMENT_AUTHORITY must be a
+	// valid base58 ed25519 pubkey when set — it names the delegate buyers
+	// approve, and a typo here would silently read the wrong token accounts.
+	var settlementAuthority string
+	if raw := os.Getenv("BILLING_SETTLEMENT_AUTHORITY"); raw != "" {
+		key, err := solana.DecodeBase58(raw, 64)
+		if err != nil || len(key) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("BILLING_SETTLEMENT_AUTHORITY is not a valid base58 ed25519 pubkey: %q", raw)
+		}
+		settlementAuthority = raw
+	}
+	allowanceRefresh, err := durationEnv("BILLING_ALLOWANCE_REFRESH", 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if settlementAuthority != "" && allowanceRefresh <= 0 {
+		return nil, fmt.Errorf("BILLING_ALLOWANCE_REFRESH must be positive, got %s", allowanceRefresh)
+	}
+
 	// Listen address: LISTEN_ADDR is the static default (the Dockerfile sets
 	// :8080, matching Fly's internal_port). Railway, by contrast, injects PORT
 	// and routes the public domain — and the deploy health check — to it, so
@@ -564,6 +594,9 @@ func Load() (*Config, error) {
 		BillingTreasuryKeypair:         treasuryKeypair,
 		BillingWithdrawPollInterval:    withdrawPollInterval,
 		BillingWithdrawBlockhashMaxAge: withdrawBlockhashMaxAge,
+
+		BillingSettlementAuthority: settlementAuthority,
+		BillingAllowanceRefresh:    allowanceRefresh,
 	}, nil
 }
 

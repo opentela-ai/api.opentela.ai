@@ -156,6 +156,67 @@ func (p *Postgres) DelegateAllowances(ctx context.Context, delegate string) ([]b
 	return scanAllowances(rows)
 }
 
+// LinkedWalletAccounts returns every (account, wallet) link, used by the
+// allowance poller to know which wallets' token accounts to inspect.
+func (p *Postgres) LinkedWalletAccounts(ctx context.Context) ([]billing.WalletAccount, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT account_id, wallet FROM user_wallets ORDER BY account_id, wallet`)
+	if err != nil {
+		return nil, fmt.Errorf("store: linked wallet accounts: %w", err)
+	}
+	defer rows.Close()
+	var out []billing.WalletAccount
+	for rows.Next() {
+		var wa billing.WalletAccount
+		if err := rows.Scan(&wa.AccountID, &wa.Wallet); err != nil {
+			return nil, fmt.Errorf("store: linked wallet accounts: scan: %w", err)
+		}
+		out = append(out, wa)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: linked wallet accounts: %w", err)
+	}
+	return out, nil
+}
+
+// ConsumeAllowance decrements the account's active allowance for `delegate`
+// by amountRaw (floored at zero) WITHOUT touching credit — the off-chain
+// charge was already debited at settle time; this records that the settlement
+// worker has exercised the delegation on-chain. The invariant it maintains
+// (allowance_raw == on-chain delegated amount after each confirmed worker
+// transfer) is what makes the poller's delta math exact: after consumption,
+// a poller observation at the same chain state yields delta 0, so a drop is
+// interpreted as a revoke only when it exceeds worker consumption.
+// Returns the updated allowance; ErrNotFound when no active row exists.
+func (p *Postgres) ConsumeAllowance(ctx context.Context, accountID, delegate string, amountRaw int64, now time.Time) (billing.Allowance, error) {
+	if amountRaw <= 0 {
+		return billing.Allowance{}, fmt.Errorf("store: consume allowance: %w: non-positive amount", billing.ErrInvalid)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE account_allowances
+		SET allowance_raw = GREATEST(allowance_raw - $3, 0)
+		WHERE account_id = $1 AND delegate = $2 AND revoked_at IS NULL`,
+		accountID, delegate, amountRaw)
+	if err != nil {
+		return billing.Allowance{}, fmt.Errorf("store: consume allowance: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return billing.Allowance{}, billing.ErrNotFound
+	}
+	var a billing.Allowance
+	err = p.pool.QueryRow(ctx, `
+		SELECT account_id, delegate, allowance_raw, approved_at, revoked_at
+		FROM account_allowances WHERE account_id = $1 AND delegate = $2`,
+		accountID, delegate).Scan(&a.AccountID, &a.Delegate, &a.AllowanceRaw, &a.ApprovedAt, &a.RevokedAt)
+	if err != nil {
+		return billing.Allowance{}, fmt.Errorf("store: consume allowance: re-read: %w", err)
+	}
+	return a, nil
+}
+
 func scanAllowances(rows pgx.Rows) ([]billing.Allowance, error) {
 	defer rows.Close()
 	var out []billing.Allowance

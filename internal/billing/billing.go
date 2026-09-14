@@ -119,6 +119,13 @@ type AccountCredit struct {
 // Available returns the spendable balance: credit not reserved.
 func (c AccountCredit) Available() int64 { return c.CreditRaw - c.ReservedRaw }
 
+// WalletAccount is one linked (account, wallet) pair — the poller's work
+// list: which wallets' OTELA token accounts to inspect for delegations.
+type WalletAccount struct {
+	AccountID string
+	Wallet    string
+}
+
 // Allowance is one mirrored SPL delegation (design §11.2): the buyer's
 // on-chain approve naming `delegate` (the settlement authority) as spender of
 // their OTELA ATA, up to AllowanceRaw. RevokedAt is nil while the delegation
