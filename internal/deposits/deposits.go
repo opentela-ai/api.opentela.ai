@@ -247,6 +247,12 @@ func (s *Service) processSignature(ctx context.Context, sig solana.SignatureInfo
 	// instruction); plain transfers are attributed via the treasury ATA
 	// filter, which is mint-unique by construction.
 	transfers := tx.TokenTransfers(s.mint, s.tokenProgram)
+	if len(transfers) == 0 {
+		// Make the silent-skip class of bug observable: a signature that
+		// touched the treasury but contains no inbound transfer into the
+		// treasury ATA (wrong destination, misrouted nested account, etc.).
+		s.log("deposits: %s: no inbound transfer into treasury; skipped", sig.Signature)
+	}
 	for _, tr := range transfers {
 		if tr.Destination != s.treasuryATA {
 			continue // not an inbound deposit into the treasury ATA

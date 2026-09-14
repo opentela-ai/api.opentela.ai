@@ -144,6 +144,58 @@ func TestRunOnceTransferCheckedWrongMintSkipped(t *testing.T) {
 	}
 }
 
+func TestRunOnceCreditsInnerTransfer(t *testing.T) {
+	svc, ata := newService(t, &fakeLinker{accounts: map[string]string{"walletA": "acct-1"}})
+	rpc := svc.rpc.(*fakeRPC)
+	st := svc.store.(*fakeStore)
+
+	// Regression for recovery flows: token transfers executed as CPIs inside
+	// an outer instruction (e.g. the ATA program's recover_nested) must be
+	// parsed from meta.innerInstructions and credited.
+	info, _ := json.Marshal(map[string]string{
+		"source": "nestedATA", "destination": ata,
+		"authority": "walletA", "amount": "200000000",
+	})
+	tx := &solana.ConfirmedTransaction{
+		Slot: 100,
+		Transaction: solana.ParsedMessage{
+			AccountKeys: []string{"walletA", "nestedATA", ata, tokenProgram},
+			Instructions: []solana.ParsedIx{{
+				ProgramID: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+				// recover_nested outer call has no parsed transfer payload.
+			}},
+		},
+		Meta: &solana.ParsedMeta{
+			PreTokenBalances: []solana.TokenBalance{
+				{AccountIndex: 1, Mint: mint, Owner: "walletA"},
+			},
+			InnerInstructions: []solana.InnerInstructionGroup{{
+				Index:        0,
+				Instructions: []solana.ParsedIx{{ProgramID: tokenProgram, Parsed: &solana.ParsedInfo{Type: "transfer", Info: info}}},
+			}},
+		},
+	}
+	rpc.sigs = []solana.SignatureInfo{{Signature: "sig-inner", Slot: 100, ConfirmationStatus: "finalized"}}
+	rpc.txs = map[string]*solana.ConfirmedTransaction{"sig-inner": tx}
+
+	if _, err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.inserts) != 1 {
+		t.Fatalf("inner transfer must be persisted: inserts = %+v", st.inserts)
+	}
+	// Synthetic index: outer 0, first inner instruction -> 0<<32|1.
+	if st.inserts[0].InstructionIndex != 1 {
+		t.Fatalf("inner transfer index = %d, want 1", st.inserts[0].InstructionIndex)
+	}
+	if st.inserts[0].AmountRaw != 200_000_000 {
+		t.Fatalf("inner transfer amount = %d", st.inserts[0].AmountRaw)
+	}
+	if len(st.applies) != 1 || st.applies[0].account != "acct-1" {
+		t.Fatalf("inner transfer must credit: applies = %+v", st.applies)
+	}
+}
+
 func itoa64(i int64) string {
 	if i == 0 {
 		return "0"

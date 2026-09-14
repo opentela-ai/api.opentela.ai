@@ -199,6 +199,15 @@ type ParsedMessage struct {
 	Instructions []ParsedIx `json:"instructions"`
 }
 
+// InnerInstructionGroup mirrors meta.innerInstructions: the outer instruction
+// index a group belongs to plus the instructions that ran inside it (CPIs).
+// Programs like the SPL associated-token-account move tokens via inner
+// instructions (e.g. recover_nested), so the deposit watcher must scan them.
+type InnerInstructionGroup struct {
+	Index        int        `json:"index"`
+	Instructions []ParsedIx `json:"instructions"`
+}
+
 // ParsedIx is the union of a token-program instruction (resolved programId +
 // structured Parsed) and a generic instruction (base58 data/accounts). Only
 // the token Transfer variant is consumed by the watcher.
@@ -245,9 +254,10 @@ type tokenTransferCheckedInfo struct {
 type ParsedMeta struct {
 	// Err is non-null when the transaction failed. Failed transactions never
 	// move tokens, but the watcher records them as skipped to avoid re-querying.
-	Err              *json.RawMessage `json:"err"`
-	PreTokenBalances []TokenBalance   `json:"preTokenBalances"`
-	LoadedAddresses  LoadedAddresses  `json:"loadedAddresses"`
+	Err               *json.RawMessage        `json:"err"`
+	PreTokenBalances  []TokenBalance          `json:"preTokenBalances"`
+	LoadedAddresses   LoadedAddresses         `json:"loadedAddresses"`
+	InnerInstructions []InnerInstructionGroup `json:"innerInstructions"`
 }
 
 // TokenBalance is one entry from meta.preTokenBalances / postTokenBalances:
@@ -309,53 +319,76 @@ func (t *ConfirmedTransaction) TokenTransfers(mint, tokenProgram string) []Token
 		return nil
 	}
 	var out []TokenTransfer
+	// Walk outer instructions and their inner CPIs in document order.
+	// Inner transfers get a synthetic index: outerIndex*1<<32 + innerIndex, so
+	// (signature, instructionIndex) stays unique and stable for the ledger.
 	for i, ix := range t.Transaction.Instructions {
-		if ix.Parsed == nil {
+		out = t.appendTransfers(out, i, 0, ix, mint, tokenProgram)
+		if t.Meta == nil {
 			continue
 		}
-		if tokenProgram != "" && ix.ProgramID != tokenProgram {
-			continue
-		}
-		var info tokenTransferInfo
-		switch ix.Parsed.Type {
-		case "transfer":
-			if err := json.Unmarshal(ix.Parsed.Info, &info); err != nil {
+		for _, group := range t.Meta.InnerInstructions {
+			if group.Index != i {
 				continue
 			}
-		case "transferChecked":
-			var checked tokenTransferCheckedInfo
-			if err := json.Unmarshal(ix.Parsed.Info, &checked); err != nil {
-				continue
+			for j, inner := range group.Instructions {
+				out = t.appendTransfers(out, i, j+1, inner, mint, tokenProgram)
 			}
-			// transferChecked names its mint; honor the mint filter directly.
-			if mint != "" && checked.Mint != mint {
-				continue
-			}
-			info = tokenTransferInfo{
-				Source:      checked.Source,
-				Destination: checked.Destination,
-				Authority:   checked.Authority,
-				Amount:      checked.TokenAmount.Amount,
-			}
-		default:
-			continue
 		}
-		if info.Source == "" || info.Destination == "" {
-			continue
-		}
-		amount, err := strconv.ParseInt(info.Amount, 10, 64)
-		if err != nil || amount <= 0 {
-			continue
-		}
-		_ = mint // mint is verified indirectly via the preTokenBalances owner
-		out = append(out, TokenTransfer{
-			InstructionIndex: i,
-			Source:           info.Source,
-			Destination:      info.Destination,
-			Authority:        info.Authority,
-			AmountRaw:        amount,
-		})
 	}
+	return out
+}
+
+// appendTransfers extracts token transfers from one instruction (outer or
+// inner) and appends them. outerIdx identifies the top-level instruction;
+// innerDepth 0 means the instruction itself ran at the top level, >0 counts
+// nested CPI depth (flat inner list position + 1).
+func (t *ConfirmedTransaction) appendTransfers(out []TokenTransfer, outerIdx, innerIdx int, ix ParsedIx, mint, tokenProgram string) []TokenTransfer {
+	if ix.Parsed == nil {
+		return out
+	}
+	if tokenProgram != "" && ix.ProgramID != tokenProgram {
+		return out
+	}
+	var info tokenTransferInfo
+	switch ix.Parsed.Type {
+	case "transfer":
+		if err := json.Unmarshal(ix.Parsed.Info, &info); err != nil {
+			return out
+		}
+	case "transferChecked":
+		var checked tokenTransferCheckedInfo
+		if err := json.Unmarshal(ix.Parsed.Info, &checked); err != nil {
+			return out
+		}
+		// transferChecked names its mint; honor the mint filter directly.
+		if mint != "" && checked.Mint != mint {
+			return out
+		}
+		info = tokenTransferInfo{
+			Source:      checked.Source,
+			Destination: checked.Destination,
+			Authority:   checked.Authority,
+			Amount:      checked.TokenAmount.Amount,
+		}
+	default:
+		return out
+	}
+	if info.Source == "" || info.Destination == "" {
+		return out
+	}
+	amount, err := strconv.ParseInt(info.Amount, 10, 64)
+	if err != nil || amount <= 0 {
+		return out
+	}
+	_ = mint // outer mint filter (transferChecked) applied above
+	out = append(out, TokenTransfer{
+		InstructionIndex: outerIdx<<32 | innerIdx,
+		Source:           info.Source,
+		Destination:      info.Destination,
+		Authority:        info.Authority,
+		AmountRaw:        amount,
+	})
 	return out
 }
 
