@@ -309,7 +309,19 @@ func (p *Postgres) ReserveBilling(ctx context.Context, req billing.Reservation) 
 		req.BuyerAccountID).Scan(&creditRaw, &reservedRaw); err != nil {
 		return billing.AccountCredit{}, fmt.Errorf("store: reserve billing: lock: %w", err)
 	}
-	if creditRaw-reservedRaw < reserve {
+	available := creditRaw - reservedRaw
+	// Phase 2 (design §11.3): active SPL delegations bound spend conservatively
+	// by min(credit available, Σ allowance). The registry rows are read in the
+	// same transaction, so a concurrent revocation/permit either lands before
+	// this reserve sees it or after the reservation — never mid-check.
+	allowSum, err := sumActiveAllowances(ctx, tx, req.BuyerAccountID)
+	if err != nil {
+		return billing.AccountCredit{}, fmt.Errorf("store: reserve billing: %w", err)
+	}
+	if allowSum > 0 && allowSum < available {
+		available = allowSum
+	}
+	if available < reserve {
 		return billing.AccountCredit{}, billing.ErrInsufficientCredit
 	}
 
@@ -433,6 +445,7 @@ func scanBillingRequest(ctx context.Context, q pgxQuerier, requestID string) (bi
 }
 
 type pgxQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 

@@ -45,6 +45,8 @@ type billingStore interface {
 	ListLedger(ctx context.Context, accountID string, cursor *billing.LedgerCursor, limit int) ([]billing.LedgerEntry, *billing.LedgerCursor, error)
 	ListDepositEvents(ctx context.Context, accountID string, cursor *billing.DepositCursor, limit int) ([]billing.DepositEvent, *billing.DepositCursor, error)
 	PrimaryWalletForAccount(ctx context.Context, accountID string) (string, bool, error)
+	// Allowances (Phase 2): the mirrored SPL delegation registry (§11).
+	AccountAllowances(ctx context.Context, accountID string) ([]billing.Allowance, error)
 	// Withdrawals (Step 7). ReserveWithdrawal debits available credit and
 	// returns the durable record; the withdrawal worker (off the request
 	// path) signs and broadcasts. Withdrawal/ListWithdrawals scope reads to
@@ -268,6 +270,17 @@ type stateResponse struct {
 	Deposits            depositInstr `json:"deposits"`
 	WithdrawalsEnabled  bool         `json:"withdrawals_enabled"`
 	PrimaryLinkedWallet *string      `json:"primary_linked_wallet"`
+	// Allowances is the account's mirrored SPL delegations (Phase 2, §11):
+	// every registry row, active and revoked. Empty until the account has
+	// delegated to the settlement authority.
+	Allowances []allowanceJSON `json:"allowances"`
+}
+
+type allowanceJSON struct {
+	Delegate     string     `json:"delegate"`
+	AllowanceRaw rawInt64   `json:"allowance_raw"`
+	ApprovedAt   time.Time  `json:"approved_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 }
 
 type balanceJSON struct {
@@ -355,7 +368,28 @@ func (s *Service) handleState(w http.ResponseWriter, r *http.Request) {
 		},
 		WithdrawalsEnabled:  s.withdrawalsEnabled,
 		PrimaryLinkedWallet: primaryLinkedWallet,
+		Allowances:          s.allowances(r, accountID),
 	})
+}
+
+// allowances lists the account's mirrored delegations. A read failure
+// degrades to an empty list so the state payload (balance/caps/deposits)
+// still renders; the console's allowance panel simply shows nothing.
+func (s *Service) allowances(r *http.Request, accountID string) []allowanceJSON {
+	rows, err := s.store.AccountAllowances(r.Context(), accountID)
+	if err != nil {
+		return []allowanceJSON{}
+	}
+	out := make([]allowanceJSON, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, allowanceJSON{
+			Delegate:     a.Delegate,
+			AllowanceRaw: rawInt64(a.AllowanceRaw),
+			ApprovedAt:   a.ApprovedAt,
+			RevokedAt:    a.RevokedAt,
+		})
+	}
+	return out
 }
 
 type preferencesRequest struct {

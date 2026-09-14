@@ -119,6 +119,72 @@ type AccountCredit struct {
 // Available returns the spendable balance: credit not reserved.
 func (c AccountCredit) Available() int64 { return c.CreditRaw - c.ReservedRaw }
 
+// Allowance is one mirrored SPL delegation (design §11.2): the buyer's
+// on-chain approve naming `delegate` (the settlement authority) as spender of
+// their OTELA ATA, up to AllowanceRaw. RevokedAt is nil while the delegation
+// is live; a drop to zero sets it, and a later grant clears it.
+type Allowance struct {
+	AccountID    string
+	Delegate     string
+	AllowanceRaw int64
+	ApprovedAt   time.Time
+	RevokedAt    *time.Time
+}
+
+// Active reports whether the delegation currently backs spend.
+func (a Allowance) Active() bool { return a.RevokedAt == nil && a.AllowanceRaw > 0 }
+
+// AllowanceChange is an observed absolute allowance for (account, delegate),
+// as read from the chain by the allowance poller. Ref identifies the on-chain
+// observation (the approve/revoke transaction signature or slot) and becomes
+// the exactly-once ledger leg ref for the credit mirror.
+type AllowanceChange struct {
+	AccountID    string
+	Delegate     string
+	AllowanceRaw int64
+	ObservedAt   time.Time
+	Ref          string
+}
+
+// AllowanceChangeResult reports what UpsertAllowance applied.
+type AllowanceChangeResult struct {
+	// PrevAllowanceRaw is the registry value before the change (0 for a
+	// first observation).
+	PrevAllowanceRaw int64
+	// AppliedRaw is the signed credit delta mirrored into the account
+	// (positive grant, negative revocation), 0 when the observation was an
+	// idempotent replay.
+	AppliedRaw int64
+	// ShortfallRaw is the non-negative amount by which a revocation could
+	// not be debited because open reservations must keep their backing
+	// (credit_raw is clamped at reserved_raw). It is platform exposure
+	// until the open reservations settle and surfaces via ReconcileAccount.
+	ShortfallRaw int64
+}
+
+// DelegationAvailable is the conservative gate bound of §11.3: with no active
+// delegation the deposit rail alone backs spend; with one or more active
+// allowances the new reservation is bounded by min(credit available,
+// Σ allowance), so a stale or inflated credit projection can never overspend
+// the on-chain delegation. Both inputs are non-negative, so no overflow
+// checks are needed for the min.
+func DelegationAvailable(credit AccountCredit, allowances []Allowance) int64 {
+	sum := int64(0)
+	for _, a := range allowances {
+		if a.Active() {
+			sum += a.AllowanceRaw
+		}
+	}
+	avail := credit.Available()
+	if avail < 0 {
+		return 0
+	}
+	if sum > 0 && sum < avail {
+		return sum
+	}
+	return avail
+}
+
 // EligiblePeerQuote is one entry in a request's immutable quote snapshot. The
 // seller account and owner wallet are resolved from instances at the gate; the
 // ask revision and three rates are read live and frozen here so settlement
@@ -576,6 +642,22 @@ type BillingStore interface {
 	EnsureAccountCredit(ctx context.Context, accountID string) error
 	AccountCredit(ctx context.Context, accountID string) (AccountCredit, error)
 	SetAccountCaps(ctx context.Context, accountID string, caps Caps) (AccountCredit, error)
+
+	// Allowances (Phase 2, design §11): the mirrored SPL delegation registry.
+	// UpsertAllowance applies one observed absolute allowance for
+	// (account, delegate) atomically: the registry row is updated and the
+	// grant/revocation delta is mirrored into the credit projection through
+	// exactly-once ledger legs (ref = the observation ref). A grant credits
+	// the account; a revocation debits it, clamped at reserved_raw (open
+	// reservations keep their backing) with the shortfall reported. Re-running
+	// the same observation is a no-op. The reserve gate bounds spend by
+	// min(credit available, Σ active allowances) whenever any active
+	// delegation exists (§11.3).
+	UpsertAllowance(ctx context.Context, ch AllowanceChange) (AllowanceChangeResult, error)
+	AccountAllowances(ctx context.Context, accountID string) ([]Allowance, error)
+	// DelegateAllowances lists the active allowances naming `delegate`, for
+	// the settlement worker to plan buyer→seller transfers.
+	DelegateAllowances(ctx context.Context, delegate string) ([]Allowance, error)
 
 	// Reservation. ReserveBilling computes the conservative reserve from the
 	// snapshot, checks available credit under a row lock, bumps reserved_raw,

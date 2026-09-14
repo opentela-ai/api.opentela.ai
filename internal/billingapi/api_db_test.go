@@ -172,6 +172,32 @@ func TestDBStateAndPreferencesRoundTrip(t *testing.T) {
 		t.Fatalf("cached cap=%s, want null", got.Caps.CachedInputPerMillion)
 	}
 
+	// Delegation grant (Phase 2): the state payload reports the allowance.
+	if _, err := pg.UpsertAllowance(ctx, billing.AllowanceChange{
+		AccountID: acct, Delegate: "SettleAuthAAA", AllowanceRaw: 750_000,
+		ObservedAt: time.Now().UTC(), Ref: "sig-approve-1",
+	}); err != nil {
+		t.Fatalf("UpsertAllowance: %v", err)
+	}
+	req2 := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
+	req2.Header.Set("Authorization", "Bearer token")
+	rec2 := httptest.NewRecorder()
+	authed(t, svc, acct).ServeHTTP(rec2, req2)
+	var gotAllow struct {
+		Allowances []struct {
+			Delegate     string `json:"delegate"`
+			AllowanceRaw string `json:"allowance_raw"`
+			RevokedAt    any    `json:"revoked_at"`
+		} `json:"allowances"`
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &gotAllow); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotAllow.Allowances) != 1 || gotAllow.Allowances[0].Delegate != "SettleAuthAAA" ||
+		gotAllow.Allowances[0].AllowanceRaw != "750000" || gotAllow.Allowances[0].RevokedAt != nil {
+		t.Fatalf("allowances = %+v", gotAllow.Allowances)
+	}
+
 	// PATCH /manage/billing/preferences → updates the DB and returns new caps.
 	patch := httptest.NewRequest(http.MethodPatch, "/manage/billing/preferences",
 		strings.NewReader(`{"max_input_per_million":3000,"max_output_per_million":9000}`))
