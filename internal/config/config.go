@@ -159,6 +159,14 @@ type Config struct {
 	// alone backs spend.
 	BillingSettlementAuthority string
 	BillingAllowanceRefresh    time.Duration
+
+	// Settlement worker (Phase 2, §11.5). The keypair signs transfer_checked
+	// batches replaying delegation-backed ledger legs on-chain; it IS the
+	// delegate, verified against BillingSettlementAuthority on boot (a
+	// mismatch is a config error, not a graceful degradation). The authority
+	// keypair also pays transaction fees, so it must hold SOL.
+	BillingSettlementKeypair      ed25519.PrivateKey
+	BillingSettlementPollInterval time.Duration
 }
 
 // BillingMode selects the off-chain billing posture for the inference proxy.
@@ -519,6 +527,31 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("BILLING_ALLOWANCE_REFRESH must be positive, got %s", allowanceRefresh)
 	}
 
+	// Settlement worker keypair: OPTIONAL (delegation read-side can run
+	// without the worker), but when present it MUST be the settlement
+	// authority's key — it signs transfer_checked as the on-chain delegate.
+	var settlementKeypair ed25519.PrivateKey
+	if raw := os.Getenv("BILLING_SETTLEMENT_KEYPAIR"); raw != "" {
+		key, err := nodecred.DecodeSigningKey(raw)
+		if err != nil {
+			return nil, fmt.Errorf("BILLING_SETTLEMENT_KEYPAIR is invalid: %w", err)
+		}
+		if settlementAuthority == "" {
+			return nil, fmt.Errorf("BILLING_SETTLEMENT_KEYPAIR set but BILLING_SETTLEMENT_AUTHORITY is empty")
+		}
+		if got := solana.EncodeBase58(key.Public().(ed25519.PublicKey)); got != settlementAuthority {
+			return nil, fmt.Errorf("BILLING_SETTLEMENT_KEYPAIR does not match BILLING_SETTLEMENT_AUTHORITY (got %s, want %s)", got, settlementAuthority)
+		}
+		settlementKeypair = key
+	}
+	settlementPoll, err := durationEnv("BILLING_SETTLEMENT_POLL_INTERVAL", 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if settlementKeypair != nil && settlementPoll <= 0 {
+		return nil, fmt.Errorf("BILLING_SETTLEMENT_POLL_INTERVAL must be positive, got %s", settlementPoll)
+	}
+
 	// Listen address: LISTEN_ADDR is the static default (the Dockerfile sets
 	// :8080, matching Fly's internal_port). Railway, by contrast, injects PORT
 	// and routes the public domain — and the deploy health check — to it, so
@@ -597,6 +630,9 @@ func Load() (*Config, error) {
 
 		BillingSettlementAuthority: settlementAuthority,
 		BillingAllowanceRefresh:    allowanceRefresh,
+
+		BillingSettlementKeypair:      settlementKeypair,
+		BillingSettlementPollInterval: settlementPoll,
 	}, nil
 }
 

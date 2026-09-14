@@ -118,6 +118,19 @@ func TransferInstructionData(amount uint64) []byte {
 	return data
 }
 
+// TransferCheckedInstructionData is the SPL Token "transfer_checked"
+// instruction (index 12) payload: u8 instruction, u64 little-endian amount,
+// u8 decimals. Accounts: [source, mint, destination, authority]. The
+// settlement worker uses it (not plain transfer) because the SPL delegate
+// path requires the mint to verify the amount against the mint's decimals.
+func TransferCheckedInstructionData(amount uint64, decimals uint8) []byte {
+	data := make([]byte, 10)
+	data[0] = 12 // TransferChecked
+	binary.LittleEndian.PutUint64(data[1:], amount)
+	data[9] = decimals
+	return data
+}
+
 // CreateATAInstructionData is the Associated Token Account "create" (index 0)
 // payload — an empty byte slice. Kept here so the withdrawal worker does not
 // repeat the literal.

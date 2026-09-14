@@ -374,6 +374,49 @@ type Withdrawal struct {
 // only writers.
 func WithdrawalRef(id int64) string { return "withdrawal:" + strconv.FormatInt(id, 10) }
 
+// DelegationSettlementState is the durable state of one on-chain settlement
+// batch (design §11.5): pending → signed → broadcast → finalized, with
+// restored/failed as the terminal recovery states. Mirrors WithdrawalState.
+type DelegationSettlementState string
+
+const (
+	SettlementPending   DelegationSettlementState = "pending"
+	SettlementSigned    DelegationSettlementState = "signed"
+	SettlementBroadcast DelegationSettlementState = "broadcast"
+	SettlementFinalized DelegationSettlementState = "finalized"
+	SettlementRestored  DelegationSettlementState = "restored"
+	SettlementFailed    DelegationSettlementState = "failed"
+)
+
+// DelegationSettlement is one batched transfer_checked the settlement
+// worker replays on-chain against a buyer's SPL delegation. The off-chain
+// charge was already exact (§11.2); this row only tracks the on-chain leg.
+type DelegationSettlement struct {
+	ID                   int64
+	BatchRef             string
+	BuyerAccount         string
+	Delegate             string
+	SourceATA            string
+	DestinationWallet    string
+	DestinationATA       string
+	AmountRaw            int64
+	State                DelegationSettlementState
+	SignedWire           string
+	Signature            string
+	Blockhash            string
+	LastValidBlockHeight *uint64
+	BlockhashExpiresAt   *time.Time
+	Error                string
+	CreatedAt            time.Time
+}
+
+// DelegationSettlementRef is the stable registry reference for the allowance
+// consumption/restore of one settlement (registry bookkeeping only — the
+// credit ledger is untouched by consumption).
+func DelegationSettlementRef(id int64) string {
+	return "delegation-settlement:" + strconv.FormatInt(id, 10)
+}
+
 // WithdrawalCursor is the stable, opaque pagination cursor over an account's
 // withdrawals, newest-first: the (reserved_at, id) of the last entry
 // returned. A nil cursor starts from the newest row.
