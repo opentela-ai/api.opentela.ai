@@ -218,6 +218,7 @@ func run() error {
 	var depositDone chan struct{}
 	var withdrawDone chan struct{}
 	var delegDone chan struct{}
+	var settleDone chan struct{}
 	var sinkDone chan struct{}
 	if sink != nil {
 		sinkDone = make(chan struct{})
@@ -328,6 +329,25 @@ func run() error {
 				poller.Run(ctx)
 			}()
 			log.Printf("allowance poller enabled (authority %s, mint %s, refresh %s)", cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingAllowanceRefresh)
+
+			// Settlement worker (Phase 2, §11.5): replay delegation-backed ledger
+			// legs as batched transfer_checked transfers signed by the settlement
+			// authority. Starts only when the keypair is configured AND verified
+			// to be the authority (config.Load rejects a mismatch on boot).
+			if cfg.BillingSettlementKeypair != nil {
+				settleRPC := solana.NewRPCClient(cfg.BillingSolanaRPC, solana.WithRPCTimeout(20*time.Second))
+				worker, err := delegations.NewSettlementWorker(settleRPC, pg, cfg.BillingSettlementKeypair, cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingTreasuryWallet, cfg.BillingDepositDecimals, cfg.BillingSettlementPollInterval, cfg.BillingWithdrawBlockhashMaxAge)
+				if err != nil {
+					return fmt.Errorf("settlement worker: %w", err)
+				}
+				worker.SetLogger(func(format string, args ...any) { log.Printf("settlement: "+format, args...) })
+				settleDone = make(chan struct{})
+				go func() {
+					defer close(settleDone)
+					worker.Run(ctx)
+				}()
+				log.Printf("settlement worker enabled (authority %s, mint %s, poll %s)", cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingSettlementPollInterval)
+			}
 		}
 	} else if sink != nil {
 		perfHook = perf.Hook(sink, perf.NewResolver(cfg.UpstreamURL, cfg.PerfPeerCacheTTL))

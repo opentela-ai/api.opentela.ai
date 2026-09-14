@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"log/slog"
 	"strings"
@@ -698,4 +699,52 @@ func TestLoadSettlementAuthority(t *testing.T) {
 			t.Fatal("invalid authority must fail")
 		}
 	})
+}
+
+func TestLoadSettlementKeypair(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+
+	// A real keypair whose public key IS the authority.
+	h := sha256.Sum256([]byte("settlement-authority"))
+	key := ed25519.NewKeyFromSeed(h[:])
+	keyB64 := base64.StdEncoding.EncodeToString(key)
+	authority := solana.EncodeBase58(key.Public().(ed25519.PublicKey))
+
+	t.Run("matching keypair accepted", func(t *testing.T) {
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", authority)
+		t.Setenv("BILLING_SETTLEMENT_KEYPAIR", keyB64)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.BillingSettlementKeypair == nil {
+			t.Fatal("keypair not loaded")
+		}
+		if cfg.BillingSettlementPollInterval != 10*time.Second {
+			t.Errorf("poll = %v, want 10s", cfg.BillingSettlementPollInterval)
+		}
+	})
+
+	t.Run("mismatched keypair rejected", func(t *testing.T) {
+		other := ed25519.NewKeyFromSeed(sha256Sum("other-seed"))
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", authority)
+		t.Setenv("BILLING_SETTLEMENT_KEYPAIR", base64.StdEncoding.EncodeToString(other))
+		if _, err := Load(); err == nil {
+			t.Fatal("mismatched keypair must fail")
+		}
+	})
+
+	t.Run("keypair without authority rejected", func(t *testing.T) {
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", "")
+		t.Setenv("BILLING_SETTLEMENT_KEYPAIR", keyB64)
+		if _, err := Load(); err == nil {
+			t.Fatal("keypair without authority must fail")
+		}
+	})
+}
+
+func sha256Sum(s string) []byte {
+	h := sha256.Sum256([]byte(s))
+	return h[:]
 }
