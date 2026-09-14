@@ -234,7 +234,7 @@ func TestGetStateReturnsBalanceAndDepositInstructions(t *testing.T) {
 		primaryWallet: primary,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "TreasuryATA", "Mint", "TokenProg", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "TreasuryATA", "TreasuryWallet", "Mint", "TokenProg", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -275,7 +275,7 @@ func TestGetStateReturnsBalanceAndDepositInstructions(t *testing.T) {
 func TestGetStateEncodesRawBalancesAsDecimalStrings(t *testing.T) {
 	const raw = int64(9_007_199_254_740_993)
 	st := &stubStore{credit: billing.AccountCredit{AccountID: "acct-1", CreditRaw: raw}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, false, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, false, nil)
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()
@@ -296,7 +296,7 @@ func TestGetStateEncodesRawBalancesAsDecimalStrings(t *testing.T) {
 
 func TestGetStateDepositsDisabledWhenOff(t *testing.T) {
 	st := &stubStore{credit: billing.AccountCredit{AccountID: "acct-1"}}
-	svc := New(st, config.BillingOff, "TreasuryATA", "Mint", "TokenProg", 9, false, nil)
+	svc := New(st, config.BillingOff, "TreasuryATA", "TreasuryWallet", "Mint", "TokenProg", 9, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -324,7 +324,7 @@ func TestGetStateOffModeIsZeroCost(t *testing.T) {
 		creditErr:  errors.New("AccountCredit must not be called in off mode"),
 		primaryErr: errors.New("PrimaryWalletForAccount must not be called in off mode"),
 	}
-	svc := New(st, config.BillingOff, "", "", "", 0, false, nil)
+	svc := New(st, config.BillingOff, "", "", "", "", 0, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -357,7 +357,7 @@ func TestGetStateOffModeIsZeroCost(t *testing.T) {
 
 func TestGetStateRequiresAccount(t *testing.T) {
 	st := &stubStore{}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 	// No principal, no account id → 401.
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	rec := httptest.NewRecorder()
@@ -371,7 +371,7 @@ func TestGetStateUsesAccountIDFallbackForApiKey(t *testing.T) {
 	st := &stubStore{
 		credit: billing.AccountCredit{AccountID: "api-acct", CreditRaw: 7},
 	}
-	svc := New(st, config.BillingObserve, "ATA", "Mint", "Prog", 9, false, nil)
+	svc := New(st, config.BillingObserve, "ATA", "Wallet", "Mint", "Prog", 9, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer legacy")
@@ -394,7 +394,7 @@ func TestPatchPreferencesSetsCaps(t *testing.T) {
 			AccountID: "acct-1", MaxInputPerMillion: ptr64(1500), MaxCachedInputPerMillion: ptr64(400), MaxOutputPerMillion: ptr64(5000),
 		},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"max_input_per_million":1500,"max_cached_input_per_million":400,"max_output_per_million":5000}`
 	req := httptest.NewRequest(http.MethodPatch, "/manage/billing/preferences", strings.NewReader(body))
@@ -426,7 +426,7 @@ func TestPatchPreferencesSetsCaps(t *testing.T) {
 
 func TestPatchPreferencesClearsDimensionWithNull(t *testing.T) {
 	st := &stubStore{setCapsOut: billing.AccountCredit{AccountID: "acct-1"}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	// null max_input → clears that dimension to unlimited.
 	body := `{"max_input_per_million":null,"max_output_per_million":9000}`
@@ -448,7 +448,7 @@ func TestPatchPreferencesClearsDimensionWithNull(t *testing.T) {
 
 func TestPatchPreferencesRejectsNegative(t *testing.T) {
 	st := &stubStore{}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"max_input_per_million":-1}`
 	req := httptest.NewRequest(http.MethodPatch, "/manage/billing/preferences", strings.NewReader(body))
@@ -473,7 +473,7 @@ func TestGetLedgerPaginatesWithOpaqueCursor(t *testing.T) {
 		},
 		ledgerNext: &next,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/ledger?limit=10", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -517,7 +517,7 @@ func TestGetLedgerPaginatesWithOpaqueCursor(t *testing.T) {
 
 func TestGetLedgerRejectsMalformedCursor(t *testing.T) {
 	st := &stubStore{}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/ledger?cursor=!!!notbase64!!!", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()
@@ -536,7 +536,7 @@ func TestGetDepositsPaginates(t *testing.T) {
 		},
 		depositNext: &next,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/deposits", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -587,7 +587,7 @@ func TestCapsJSONKeyNames(t *testing.T) {
 			MaxCachedInputPerMillion: ptr64(500), MaxOutputPerMillion: ptr64(6000),
 		},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -641,7 +641,7 @@ func TestCreateWithdrawalReserves(t *testing.T) {
 		primaryOK:     true,
 		reserveOut:    billing.Withdrawal{ID: 77, AccountID: "acct-1", DestinationWallet: dest, AmountRaw: 4_000, State: billing.WithdrawalReserved, ReservedAt: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -680,7 +680,7 @@ func TestCreateWithdrawalAcceptsLosslessDecimalString(t *testing.T) {
 			State: billing.WithdrawalReserved, ReservedAt: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC),
 		},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 	body := `{"amount_raw":"9007199254740993"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer token")
@@ -709,7 +709,7 @@ func TestCreateWithdrawalInsufficientCreditPreCheck(t *testing.T) {
 		primaryWallet: dest,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000,"idempotency_key":"idem-2"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -733,7 +733,7 @@ func TestCreateWithdrawalUsesBodyIdempotencyKeyCompatibility(t *testing.T) {
 		primaryOK:     true,
 		reserveOut:    billing.Withdrawal{ID: 78, AccountID: "acct-1", DestinationWallet: dest, AmountRaw: 4_000, State: billing.WithdrawalReserved, ReservedAt: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000,"idempotency_key":"idem-body"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -756,7 +756,7 @@ func TestCreateWithdrawalRejectsIdempotencyMismatch(t *testing.T) {
 		primaryWallet: dest,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000,"idempotency_key":"idem-body"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -780,7 +780,7 @@ func TestCreateWithdrawalDisabled(t *testing.T) {
 		primaryWallet: dest,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, false, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, false, nil)
 
 	body := `{"amount_raw":4000}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -799,7 +799,7 @@ func TestCreateWithdrawalDisabled(t *testing.T) {
 
 func TestCreateWithdrawalRequiresPrimaryWallet(t *testing.T) {
 	st := &stubStore{credit: billing.AccountCredit{AccountID: "acct-1", CreditRaw: 10_000}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(`{"amount_raw":4000}`))
 	req.Header.Set("Authorization", "Bearer token")
@@ -820,7 +820,7 @@ func TestCreateWithdrawalRejectsDestinationMismatch(t *testing.T) {
 		primaryWallet: primary,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + other + `","amount_raw":4000}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -840,7 +840,7 @@ func TestCreateWithdrawalRejectsInvalidPrimaryWallet(t *testing.T) {
 		primaryWallet: "not-a-pubkey",
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(`{"amount_raw":4000}`))
 	req.Header.Set("Authorization", "Bearer token")
@@ -860,7 +860,7 @@ func TestCreateWithdrawalMissingIdempotencyKey(t *testing.T) {
 		primaryWallet: dest,
 		primaryOK:     true,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -881,7 +881,7 @@ func TestCreateWithdrawalStoreConflict(t *testing.T) {
 		primaryOK:     true,
 		reserveErr:    billing.ErrConflict,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000,"idempotency_key":"idem-4"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -904,7 +904,7 @@ func TestCreateWithdrawalStoreInsufficientCreditRace(t *testing.T) {
 		primaryOK:     true,
 		reserveErr:    billing.ErrInsufficientCredit,
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	body := `{"destination_wallet":"` + dest + `","amount_raw":4000,"idempotency_key":"idem-5"}`
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", strings.NewReader(body))
@@ -918,7 +918,7 @@ func TestCreateWithdrawalStoreInsufficientCreditRace(t *testing.T) {
 }
 
 func TestCreateWithdrawalRequiresAccount(t *testing.T) {
-	svc := New(&stubStore{}, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(&stubStore{}, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 	req := httptest.NewRequest(http.MethodPost, "/manage/billing/withdrawals", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	svc.Routes().ServeHTTP(rec, req)
@@ -930,7 +930,7 @@ func TestCreateWithdrawalRequiresAccount(t *testing.T) {
 func TestGetWithdrawal(t *testing.T) {
 	dest := validDestWallet(t)
 	st := &stubStore{withdrawalOut: billing.Withdrawal{ID: 55, AccountID: "acct-1", DestinationWallet: dest, AmountRaw: 1000, State: billing.WithdrawalBroadcast}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/withdrawals/55", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -961,7 +961,7 @@ func TestGetWithdrawal(t *testing.T) {
 
 func TestGetWithdrawalNotFound(t *testing.T) {
 	st := &stubStore{withdrawalErr: billing.ErrNotFound}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/withdrawals/999", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -974,7 +974,7 @@ func TestGetWithdrawalNotFound(t *testing.T) {
 }
 
 func TestGetWithdrawalBadID(t *testing.T) {
-	svc := New(&stubStore{}, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(&stubStore{}, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/withdrawals/notanint", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()
@@ -993,7 +993,7 @@ func TestListWithdrawalsPaginates(t *testing.T) {
 		},
 		listWNext: &billing.WithdrawalCursor{ReservedAt: time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC), ID: 2},
 	}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/withdrawals?limit=2", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -1053,7 +1053,7 @@ func TestGetAsksSellerPricingSurface(t *testing.T) {
 			},
 		},
 	}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, m)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, m)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/asks", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -1113,7 +1113,7 @@ func TestGetAsksOffModeEmptyPayload(t *testing.T) {
 	st := &stubStore{
 		ensureErr: errors.New("EnsureAccountCredit must not be called in off mode"),
 	}
-	svc := New(st, config.BillingOff, "", "", "", 0, false, nil)
+	svc := New(st, config.BillingOff, "", "", "", "", 0, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/asks", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -1134,7 +1134,7 @@ func TestGetAsksOffModeEmptyPayload(t *testing.T) {
 
 func TestGetAsksStoreErrorIs503(t *testing.T) {
 	st := &stubStore{instancesErr: errors.New("db down")}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/asks", nil)
 	req.Header.Set("Authorization", "Bearer token")

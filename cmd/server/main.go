@@ -156,7 +156,7 @@ func run() error {
 				treasuryATA = solana.EncodeBase58(ata)
 			}
 		}
-		billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
+		billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
 		log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
 		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)

@@ -97,6 +97,7 @@ type Service struct {
 	store              billingStore
 	mode               config.BillingMode
 	treasuryATA        string
+	treasuryWallet     string
 	mint               string
 	tokenProgram       string
 	decimals           int
@@ -115,10 +116,13 @@ func (s *Service) SetReconciler(rec Reconciler) {
 }
 
 // New builds a Service. treasuryATA is the derived associated token account
+// and treasuryWallet its owning wallet (the console needs the wallet to build
+// deposit transactions: wallets must send to the wallet's ATA, never paste
+// the ATA itself as a recipient — wallets misroute it one level deeper).
 // (solana.AssociatedTokenAddress) the deposit watcher polls; mint, decimals,
 // and tokenProgram describe the OTELA token so the UI can render a valid
 // transfer and a human-readable amount.
-func New(store billingStore, mode config.BillingMode, treasuryATA, mint, tokenProgram string, decimals int, withdrawalsEnabled bool, meshClient SellerMesh) *Service {
+func New(store billingStore, mode config.BillingMode, treasuryATA, treasuryWallet, mint, tokenProgram string, decimals int, withdrawalsEnabled bool, meshClient SellerMesh) *Service {
 	return &Service{
 		store:              store,
 		mode:               mode,
@@ -339,11 +343,12 @@ type capsJSON struct {
 }
 
 type depositInstr struct {
-	Enabled      bool   `json:"enabled"`
-	TreasuryATA  string `json:"treasury_ata,omitempty"`
-	Mint         string `json:"mint,omitempty"`
-	TokenProgram string `json:"token_program,omitempty"`
-	Decimals     int    `json:"decimals,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	TreasuryATA    string `json:"treasury_ata,omitempty"`
+	TreasuryWallet string `json:"treasury_wallet,omitempty"`
+	Mint           string `json:"mint,omitempty"`
+	TokenProgram   string `json:"token_program,omitempty"`
+	Decimals       int    `json:"decimals,omitempty"`
 }
 
 // --- handlers ---
@@ -399,11 +404,12 @@ func (s *Service) handleState(w http.ResponseWriter, r *http.Request) {
 			OutputPerMillion:      nullableIntFrom(ac.MaxOutputPerMillion),
 		},
 		Deposits: depositInstr{
-			Enabled:      s.mode != config.BillingOff && s.treasuryATA != "",
-			TreasuryATA:  s.treasuryATA,
-			Mint:         s.mint,
-			TokenProgram: s.tokenProgram,
-			Decimals:     s.decimals,
+			Enabled:        s.mode != config.BillingOff && s.treasuryATA != "",
+			TreasuryATA:    s.treasuryATA,
+			TreasuryWallet: s.treasuryWallet,
+			Mint:           s.mint,
+			TokenProgram:   s.tokenProgram,
+			Decimals:       s.decimals,
 		},
 		WithdrawalsEnabled:  s.withdrawalsEnabled,
 		PrimaryLinkedWallet: primaryLinkedWallet,

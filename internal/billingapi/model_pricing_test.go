@@ -100,7 +100,7 @@ func (s *stubStore) ReplaceAsks(_ context.Context, peerID string, asks []billing
 }
 
 func newPricingTestService(st *stubStore) *Service {
-	return New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, &stubMesh{peers: map[string]mesh.PeerObservation{}})
+	return New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, &stubMesh{peers: map[string]mesh.PeerObservation{}})
 }
 
 func TestModelCapsSheetRoundTrip(t *testing.T) {
@@ -170,7 +170,7 @@ func TestAskConfigPutPublishesImmediately(t *testing.T) {
 			Services:   []mesh.ServiceObservation{{Name: "llm", IdentityGroups: []string{"model=m1"}}},
 		},
 	}}
-	svc := New(st, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, m)
+	svc := New(st, config.BillingEnforce, "ATA", "Wallet", "Mint", "Prog", 9, true, m)
 
 	body := `{"asks":[{"service":"llm","model":"m1","input_per_million":100,"cached_input_per_million":30,"output_per_million":300}]}`
 	rec := httptest.NewRecorder()
@@ -325,7 +325,7 @@ func TestAskConfigListScopesToOwnedPeers(t *testing.T) {
 
 func TestPricingEndpointsOffMode(t *testing.T) {
 	st := &stubStore{}
-	svc := New(st, config.BillingOff, "ATA", "Mint", "Prog", 9, true, &stubMesh{peers: map[string]mesh.PeerObservation{}})
+	svc := New(st, config.BillingOff, "ATA", "Wallet", "Mint", "Prog", 9, true, &stubMesh{peers: map[string]mesh.PeerObservation{}})
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodPut, "/manage/billing/preferences/models", `{"models":[]}`},
 		{http.MethodPut, "/manage/billing/asks-config/peer-x", `{"asks":[]}`},

@@ -44,7 +44,7 @@ func TestReconciliationEndpointFull(t *testing.T) {
 		}},
 		Exposure: billing.ExposureSummary{RestoredCount: 1, RestoredRaw: 4_000},
 	}}
-	svc := New(st, "enforce", "treasury-ata", "mint", "tp", 6, false, nil)
+	svc := New(st, "enforce", "treasury-ata", "treasury-wallet", "mint", "tp", 6, false, nil)
 	svc.SetReconciler(rec)
 	h := authed(t, svc, "acct-1")
 
@@ -83,7 +83,7 @@ func TestReconciliationEndpointLedgerOnly(t *testing.T) {
 		rec:    billing.Reconciliation{AccountID: "acct-1", CreditRaw: 0, ExpectedCredit: 0, InvariantHeld: true},
 		merkle: billing.MerkleSummary{Root: []byte(make([]byte, 32)), LeafCount: 0},
 	}
-	svc := New(st, "enforce", "treasury-ata", "mint", "tp", 6, false, nil)
+	svc := New(st, "enforce", "treasury-ata", "treasury-wallet", "mint", "tp", 6, false, nil)
 	h := authed(t, svc, "acct-1")
 
 	req := httptest.NewRequest("GET", "/manage/billing/reconciliation", nil)
@@ -104,7 +104,7 @@ func TestReconciliationEndpointLedgerOnly(t *testing.T) {
 
 func TestReconciliationEndpointStoreError(t *testing.T) {
 	st := &stubStore{recErr: errors.New("db down")}
-	svc := New(st, "enforce", "treasury-ata", "mint", "tp", 6, false, nil)
+	svc := New(st, "enforce", "treasury-ata", "treasury-wallet", "mint", "tp", 6, false, nil)
 	h := authed(t, svc, "acct-1")
 	req := httptest.NewRequest("GET", "/manage/billing/reconciliation", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -123,7 +123,7 @@ func TestMerkleProofEndpoint(t *testing.T) {
 		proofLeaf: leaf, proofPath: path, proofRoot: root, proofCount: 3,
 		indexOut: 2, indexOK: true,
 	}
-	svc := New(st, "enforce", "treasury-ata", "mint", "tp", 6, false, nil)
+	svc := New(st, "enforce", "treasury-ata", "treasury-wallet", "mint", "tp", 6, false, nil)
 	h := authed(t, svc, "acct-1")
 
 	req := httptest.NewRequest("GET", "/manage/billing/merkle-proof?leaf_id=42", nil)
@@ -175,7 +175,7 @@ func TestMerkleProofVerifiesWithBillingRules(t *testing.T) {
 		proofLeaf: leaves[1], proofPath: path, proofRoot: root, proofCount: 2,
 		indexOut: 1, indexOK: true,
 	}
-	svc := New(st, "enforce", "treasury-ata", "mint", "tp", 6, false, nil)
+	svc := New(st, "enforce", "treasury-ata", "treasury-wallet", "mint", "tp", 6, false, nil)
 	h := authed(t, svc, "acct-1")
 	req := httptest.NewRequest("GET", "/manage/billing/merkle-proof?leaf_id=7", nil)
 	req.Header.Set("Authorization", "Bearer token")
