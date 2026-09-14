@@ -662,3 +662,40 @@ func TestLoadObservabilityRejectsBadFormat(t *testing.T) {
 		t.Fatalf("Load() err = %v, want one mentioning LOG_FORMAT", err)
 	}
 }
+
+func TestLoadSettlementAuthority(t *testing.T) {
+	t.Setenv("OPENTELA_UPSTREAM_URL", "https://api.opentela.ai")
+	t.Setenv("DATABASE_URL", "postgres://localhost/db")
+
+	t.Run("unset: delegation off", func(t *testing.T) {
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", "")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.BillingSettlementAuthority != "" {
+			t.Errorf("authority = %q, want empty", cfg.BillingSettlementAuthority)
+		}
+		if cfg.BillingAllowanceRefresh != 60*time.Second {
+			t.Errorf("refresh = %v, want 60s", cfg.BillingAllowanceRefresh)
+		}
+	})
+
+	t.Run("valid pubkey accepted", func(t *testing.T) {
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", "LaAGasGwQCLHdUMErLAvqPwULmqhyWYTbM7GoFYJffm")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if cfg.BillingSettlementAuthority != "LaAGasGwQCLHdUMErLAvqPwULmqhyWYTbM7GoFYJffm" {
+			t.Errorf("authority = %q", cfg.BillingSettlementAuthority)
+		}
+	})
+
+	t.Run("invalid pubkey rejected", func(t *testing.T) {
+		t.Setenv("BILLING_SETTLEMENT_AUTHORITY", "not-a-pubkey with spaces")
+		if _, err := Load(); err == nil {
+			t.Fatal("invalid authority must fail")
+		}
+	})
+}

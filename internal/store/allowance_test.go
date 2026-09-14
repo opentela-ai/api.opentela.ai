@@ -210,6 +210,41 @@ func TestUpsertAllowanceRevivesRegistry(t *testing.T) {
 	}
 }
 
+func TestConsumeAllowance(t *testing.T) {
+	p := newTestStore(t)
+	ctx := context.Background()
+
+	grantAllowance(t, p, "acct-c1", "SettleAuth1", 500_000, "obs-c1")
+
+	// Consume 200k: registry drops, credit untouched.
+	a, err := p.ConsumeAllowance(ctx, "acct-c1", "SettleAuth1", 200_000, time.Now().UTC())
+	if err != nil || a.AllowanceRaw != 300_000 {
+		t.Fatalf("consume = %+v, %v", a, err)
+	}
+	if got := creditOf(t, p, "acct-c1").CreditRaw; got != 500_000 {
+		t.Fatalf("credit after consume = %d, want 500000 (unchanged)", got)
+	}
+
+	// Over-consume floors at zero and stays active-eligible=false.
+	a, err = p.ConsumeAllowance(ctx, "acct-c1", "SettleAuth1", 999_999, time.Now().UTC())
+	if err != nil || a.AllowanceRaw != 0 {
+		t.Fatalf("over-consume = %+v, %v", a, err)
+	}
+
+	// No active row (revoked to 0 by consumption... row still exists with 0;
+	// the WHERE clause requires revoked_at IS NULL — 0 allowance still counts
+	// as active until a revoke observation lands) → consume again works but
+	// a missing delegate row does not.
+	if _, err := p.ConsumeAllowance(ctx, "acct-c1", "UnknownDelegate", 1, time.Now().UTC()); !errors.Is(err, billing.ErrNotFound) {
+		t.Fatalf("unknown delegate: err = %v, want ErrNotFound", err)
+	}
+
+	// Validation.
+	if _, err := p.ConsumeAllowance(ctx, "acct-c1", "SettleAuth1", 0, time.Now().UTC()); err == nil {
+		t.Fatal("zero amount must fail")
+	}
+}
+
 func TestUpsertAllowanceValidation(t *testing.T) {
 	p := newTestStore(t)
 	ctx := context.Background()

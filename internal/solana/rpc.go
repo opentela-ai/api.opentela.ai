@@ -444,6 +444,72 @@ func (c *RPCClient) AccountExists(ctx context.Context, pubkey string) (bool, err
 	return out.Result.Value != nil && string(*out.Result.Value) != "null", nil
 }
 
+// TokenDelegate is the delegation state of a parsed SPL token account.
+type TokenDelegate struct {
+	// Delegate is the base58 pubkey authorized to spend, empty when none.
+	Delegate string
+	// DelegatedAmountRaw is the remaining delegated amount in raw smallest
+	// units, 0 when no delegation exists.
+	DelegatedAmountRaw uint64
+	// Slot is the chain slot the read was served at — the observation ref's
+	// uniqueness component for the allowance registry.
+	Slot uint64
+}
+
+type parsedTokenAccount struct {
+	Data struct {
+		Parsed struct {
+			Info struct {
+				Delegate        *string `json:"delegate"`
+				DelegatedAmount *struct {
+					Amount string `json:"amount"`
+				} `json:"delegatedAmount"`
+			} `json:"info"`
+		} `json:"parsed"`
+	} `json:"data"`
+}
+
+// TokenDelegation reads the delegation state of the token account at ata
+// using getAccountInfo with jsonParsed encoding. ok=false when the account
+// does not exist (no ATA yet — no delegation possible).
+func (c *RPCClient) TokenDelegation(ctx context.Context, ata string) (TokenDelegate, bool, error) {
+	if _, err := DecodeBase58(ata, PublicKeyBytes); err != nil {
+		return TokenDelegate{}, false, fmt.Errorf("solana rpc: token delegation: %w", err)
+	}
+	// call() strips the RPC envelope and decodes the `result` member, so dest
+	// is the getAccountInfo result itself ({context, value}). A null result
+	// (missing account) leaves Value nil.
+	var out struct {
+		Context struct {
+			Slot uint64 `json:"slot"`
+		} `json:"context"`
+		Value *parsedTokenAccount `json:"value"`
+	}
+	if err := c.call(ctx, "getAccountInfo", []any{
+		ata,
+		map[string]any{"encoding": "jsonParsed", "commitment": "confirmed"},
+	}, &out); err != nil {
+		return TokenDelegate{}, false, err
+	}
+	if out.Value == nil {
+		return TokenDelegate{}, false, nil
+	}
+	var td TokenDelegate
+	td.Slot = out.Context.Slot
+	info := out.Value.Data.Parsed.Info
+	if info.Delegate != nil {
+		td.Delegate = *info.Delegate
+	}
+	if info.DelegatedAmount != nil {
+		n, err := strconv.ParseUint(info.DelegatedAmount.Amount, 10, 64)
+		if err != nil {
+			return TokenDelegate{}, true, fmt.Errorf("solana rpc: token delegation: bad delegatedAmount %q", info.DelegatedAmount.Amount)
+		}
+		td.DelegatedAmountRaw = n
+	}
+	return td, true, nil
+}
+
 // SendTransaction broadcasts a fully signed wire-format transaction and
 // returns its signature. Base64 is the modern default (avoids edge cases with
 // large base58-encoded transactions on some providers).

@@ -18,6 +18,7 @@ import (
 	"github.com/opentela-ai/api/internal/billinggate"
 	"github.com/opentela-ai/api/internal/catalog"
 	"github.com/opentela-ai/api/internal/config"
+	"github.com/opentela-ai/api/internal/delegations"
 	"github.com/opentela-ai/api/internal/deposits"
 	"github.com/opentela-ai/api/internal/faucet"
 	"github.com/opentela-ai/api/internal/faucetapi"
@@ -216,6 +217,7 @@ func run() error {
 	var sweeperDone chan struct{}
 	var depositDone chan struct{}
 	var withdrawDone chan struct{}
+	var delegDone chan struct{}
 	var sinkDone chan struct{}
 	if sink != nil {
 		sinkDone = make(chan struct{})
@@ -306,6 +308,26 @@ func run() error {
 				worker.Run(ctx)
 			}()
 			log.Printf("withdrawal worker enabled (treasury %s, mint %s, poll %s)", cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingWithdrawPollInterval)
+		}
+
+		// Allowance poller (Phase 2, design §11.3): mirror SPL delegations to
+		// BILLING_SETTLEMENT_AUTHORITY into the registry so the reserve gate's
+		// min(credit, Σ allowance) bound tracks the chain. Runs only when the
+		// authority is configured; unset means the custodial deposit rail
+		// alone backs spend and the poller stays off.
+		if cfg.BillingSettlementAuthority != "" {
+			delegRPC := solana.NewRPCClient(cfg.BillingSolanaRPC, solana.WithRPCTimeout(20*time.Second))
+			poller, err := delegations.New(delegRPC, pg, cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingAllowanceRefresh)
+			if err != nil {
+				return fmt.Errorf("allowance poller: %w", err)
+			}
+			poller.SetLogger(func(format string, args ...any) { log.Printf("delegations: "+format, args...) })
+			delegDone = make(chan struct{})
+			go func() {
+				defer close(delegDone)
+				poller.Run(ctx)
+			}()
+			log.Printf("allowance poller enabled (authority %s, mint %s, refresh %s)", cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingAllowanceRefresh)
 		}
 	} else if sink != nil {
 		perfHook = perf.Hook(sink, perf.NewResolver(cfg.UpstreamURL, cfg.PerfPeerCacheTTL))
