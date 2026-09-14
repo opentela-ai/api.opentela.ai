@@ -58,6 +58,20 @@ type billingStore interface {
 	// registered instances and their live asks.
 	ListInstancesByUser(ctx context.Context, accountID string) ([]store.InstanceInfo, error)
 	LiveAsksByPeers(ctx context.Context, peerIDs []string, now time.Time) ([]billing.Ask, error)
+	// Reconciliation (§11.5.5): ledger integrity, the Merkle commitment
+	// over the account's ledger, and row-level inclusion proofs.
+	ReconcileAccount(ctx context.Context, accountID string, now time.Time) (billing.Reconciliation, error)
+	AccountMerkleSummary(ctx context.Context, accountID string) (billing.MerkleSummary, error)
+	MerkleProofForLedgerRow(ctx context.Context, accountID string, leafID int64) (leaf []byte, path [][]byte, root []byte, leafCount int, err error)
+	LedgerLeafIndex(ctx context.Context, accountID string, leafID int64) (int, bool, error)
+}
+
+// Reconciler produces the §11.5.5 audit: registry-vs-chain cross-check and
+// residual exposure, layered over the store-side ledger audit. Optional —
+// when no settlement authority is configured, the reconciliation endpoint
+// serves the ledger-only portion from the store.
+type Reconciler interface {
+	Report(ctx context.Context, accountID string) (billing.ReconciliationReport, error)
 }
 
 // SellerMesh resolves a peer's live advertisement (served services/models)
@@ -81,7 +95,14 @@ type Service struct {
 	mesh               SellerMesh
 	ledgerLimit        int
 	depositLimit       int
+	reconciler         Reconciler
 	now                func() time.Time
+}
+
+// SetReconciler installs the §11.5.5 auditor (delegations.Reconciler). When
+// unset, GET /manage/billing/reconciliation serves the ledger-only report.
+func (s *Service) SetReconciler(rec Reconciler) {
+	s.reconciler = rec
 }
 
 // New builds a Service. treasuryATA is the derived associated token account
@@ -116,6 +137,8 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("POST /manage/billing/withdrawals", s.handleWithdrawalsCreate)
 	mux.HandleFunc("GET /manage/billing/withdrawals", s.handleWithdrawalsList)
 	mux.HandleFunc("GET /manage/billing/withdrawals/{id}", s.handleWithdrawal)
+	mux.HandleFunc("GET /manage/billing/reconciliation", s.handleReconciliation)
+	mux.HandleFunc("GET /manage/billing/merkle-proof", s.handleMerkleProof)
 	return mux
 }
 

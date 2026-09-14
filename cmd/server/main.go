@@ -58,6 +58,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Hoisted to run()-scope: the §11.5.5 reconciler (wired in the
+	// delegations section below) attaches to the same management Service
+	// that the manage router mounts above.
+	var billingRoutes *billingapi.Service
 
 	// Observability is the first thing wired so every line below — and,
 	// via the standard library's log bridge, the existing log.Printf call
@@ -149,7 +153,7 @@ func run() error {
 				treasuryATA = solana.EncodeBase58(ata)
 			}
 		}
-		billingRoutes := billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
+		billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
 		log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
 		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
@@ -323,6 +327,19 @@ func run() error {
 				return fmt.Errorf("allowance poller: %w", err)
 			}
 			poller.SetLogger(func(format string, args ...any) { log.Printf("delegations: "+format, args...) })
+
+			// Reconciler (§11.5.5): backs GET /manage/billing/reconciliation
+			// and /manage/billing/merkle-proof — the ledger's Merkle
+			// commitment, the registry-vs-chain cross-check, and residual
+			// exposure reporting. On-demand (cron/console driven), no loop.
+			reconciler, err := delegations.NewReconciler(pg, delegRPC, cfg.BillingSettlementAuthority, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram)
+			if err != nil {
+				return fmt.Errorf("billing reconciler: %w", err)
+			}
+			reconciler.SetLogger(func(format string, args ...any) { log.Printf("reconcile: "+format, args...) })
+			billingRoutes.SetReconciler(reconciler)
+			log.Printf("billing reconciliation enabled (authority %s)", cfg.BillingSettlementAuthority)
+
 			delegDone = make(chan struct{})
 			go func() {
 				defer close(delegDone)
