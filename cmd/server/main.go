@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os/signal"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"github.com/opentela-ai/api/internal/server"
 	"github.com/opentela-ai/api/internal/settlement"
 	"github.com/opentela-ai/api/internal/solana"
+	"github.com/opentela-ai/api/internal/solrpcproxy"
 	"github.com/opentela-ai/api/internal/store"
 	"github.com/opentela-ai/api/internal/walletsapi"
 	"github.com/opentela-ai/api/internal/withdraw"
@@ -390,7 +392,22 @@ func run() error {
 	if billingGate != nil {
 		proxyHandler = billingGate
 	}
-	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue)
+	// Solana RPC proxy (browser plane): forwards allowed JSON-RPC for the
+	// dApps — the public mainnet RPC rejects browser Origins. Upstream
+	// defaults to the billing/faucet node; unset everything disables the
+	// route entirely.
+	var solRPCHandler http.Handler
+	if cfg.SolRPCProxyUpstream != "" {
+		upstream, err := url.Parse(cfg.SolRPCProxyUpstream)
+		if err != nil {
+			return fmt.Errorf("solana rpc proxy upstream: %w", err)
+		}
+		solRPCHandler = solrpcproxy.New(upstream, cfg.SolRPCProxyMethods,
+			solrpcproxy.WithRateLimit(cfg.SolRPCProxyRateRPS, cfg.SolRPCProxyBurst),
+			solrpcproxy.WithLogger(func(format string, args ...any) { log.Printf("solrpc: "+format, args...) }),
+		)
+	}
+	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue, solRPCHandler)
 	if cfg.BillingMode != config.BillingOff {
 		log.Printf("billing mode %s (output token max %d)", cfg.BillingMode, cfg.BillingOutputMax)
 	}

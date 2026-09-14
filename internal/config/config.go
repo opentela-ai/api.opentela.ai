@@ -130,8 +130,21 @@ type Config struct {
 	// program default to the faucet's, since devnet deposits use the same
 	// network. The watcher runs only when BILLING_MODE != off AND
 	// BillingTreasuryWallet is set.
-	BillingTreasuryWallet      string
-	BillingSolanaRPC           string
+	BillingTreasuryWallet string
+	BillingSolanaRPC      string
+
+	// Solana RPC proxy (browser plane): when SolRPCProxyUpstream is set the
+	// server serves POST /solana-rpc, forwarding browser JSON-RPC to the
+	// upstream node behind a method allowlist, body cap, and per-IP rate
+	// limit. Browsers cannot call the public mainnet RPC (it 403s browser
+	// Origins), so the API — a backend — lends them its connectivity.
+	// Defaults to the billing/faucet RPC when unset; empty disables the
+	// route entirely. SolRPCProxyMethods overrides the allowlist
+	// (comma-separated); SolRPCProxyRateRPS/Burst tune the per-IP bucket.
+	SolRPCProxyUpstream        string
+	SolRPCProxyMethods         []string
+	SolRPCProxyRateRPS         float64
+	SolRPCProxyBurst           int
 	BillingDepositMint         string
 	BillingDepositTokenProgram string
 	BillingDepositDecimals     int
@@ -454,6 +467,28 @@ func Load() (*Config, error) {
 	// deposits use the same network.
 	billingTreasury := os.Getenv("BILLING_TREASURY_WALLET")
 	billingSolanaRPC := stringEnv("BILLING_SOLANA_RPC_URL", faucetRPC)
+
+	// Solana RPC proxy: upstream defaults to the same node billing/faucet
+	// already use, so one env (FAUCET_SOLANA_RPC_URL or BILLING_SOLANA_RPC_URL)
+	// lights up the browser plane too. Set SOLANA_RPC_PROXY_UPSTREAM
+	// explicitly to route browsers at a different endpoint.
+	solProxyUpstream := stringEnv("SOLANA_RPC_PROXY_UPSTREAM", billingSolanaRPC)
+	solProxyMethods := []string(nil)
+	if raw := strings.TrimSpace(os.Getenv("SOLANA_RPC_PROXY_METHODS")); raw != "" {
+		for _, m := range strings.Split(raw, ",") {
+			if m = strings.TrimSpace(m); m != "" {
+				solProxyMethods = append(solProxyMethods, m)
+			}
+		}
+	}
+	solProxyRPS, err := floatEnv("SOLANA_RPC_PROXY_RATE_RPS", 20)
+	if err != nil {
+		return nil, err
+	}
+	solProxyBurst, err := intEnv("SOLANA_RPC_PROXY_BURST", 40)
+	if err != nil {
+		return nil, err
+	}
 	billingMint := stringEnv("BILLING_DEPOSIT_MINT", faucetMint)
 	billingTokenProgram := stringEnv("BILLING_DEPOSIT_TOKEN_PROGRAM", faucetTokenProgram)
 	billingPollInterval, err := durationEnv("BILLING_DEPOSIT_POLL_INTERVAL", 30*time.Second)
@@ -620,6 +655,10 @@ func Load() (*Config, error) {
 		BillingRequirePricedPeer:       billingRequirePricedPeer,
 		BillingTreasuryWallet:          billingTreasury,
 		BillingSolanaRPC:               billingSolanaRPC,
+		SolRPCProxyUpstream:            solProxyUpstream,
+		SolRPCProxyMethods:             solProxyMethods,
+		SolRPCProxyRateRPS:             solProxyRPS,
+		SolRPCProxyBurst:               solProxyBurst,
 		BillingDepositMint:             billingMint,
 		BillingDepositTokenProgram:     billingTokenProgram,
 		BillingDepositDecimals:         billingDecimals,

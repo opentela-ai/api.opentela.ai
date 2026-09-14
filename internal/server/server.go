@@ -48,7 +48,7 @@ func NewWithInternalOpts(v auth.TokenValidator, proxy http.Handler, keyMgmt http
 }
 
 func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options) http.Handler {
-	return NewWithBilling(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, corsOrigins, billing, nil, nil, nil, nil)
+	return NewWithBilling(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, corsOrigins, billing, nil, nil, nil, nil, nil)
 }
 
 // NewWithBilling is NewWithControlPlanes plus the billing gate (which wraps
@@ -56,7 +56,7 @@ func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt htt
 // /internal/pricing, when non-nil). billingGate must already wrap the proxy
 // with the API-key middleware (the gate reads the owning account from
 // context), so callers pass the gate in place of the raw proxy.
-func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler) http.Handler {
+func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler, solRPC http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -86,8 +86,14 @@ func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Hand
 	if pricingIssue != nil {
 		mux.Handle("/internal/pricing/issue", pricingIssue)
 	}
-
 	cors := corsmw.Middleware(corsOrigins)
+
+	// Browser plane: the dApps cannot call the public mainnet RPC (it 403s
+	// browser Origins), so the server proxies allowed JSON-RPC methods with
+	// its own backend connectivity. CORS still gates which origins may call.
+	if solRPC != nil {
+		mux.Handle("/solana-rpc", cors(solRPC))
+	}
 	// Permissionless like /v1/services: the leaderboard serves aggregated,
 	// anonymized performance only (no peer identity, no keys).
 	if leaderboard != nil {
