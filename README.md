@@ -591,8 +591,8 @@ membership revision, and fresh ownership.
 | `FAUCET_MINT`                 | no*     | —       | OTELA SPL token mint address                      |
 | `FAUCET_TOKEN_PROGRAM`        | no      | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | SPL Token or Token-2022 program id |
 | `FAUCET_WALLET_KEYPAIR`       | no*     | —       | Base64 Ed25519 seed/private key of the funded faucet wallet |
-| `FAUCET_AMOUNT`               | no      | `1000000000` | Per-claim payout in token base units (1 OTELA @ 9 decimals) |
-| `FAUCET_DECIMALS`             | no      | `9`      | Token decimals, used for display and JSON output  |
+| `FAUCET_AMOUNT`               | no      | `1000000` | Per-claim payout in token base units (1 OTELA @ 6 decimals) |
+| `FAUCET_DECIMALS`             | no      | `6`      | Token decimals, used for display and JSON output  |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.
