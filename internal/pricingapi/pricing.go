@@ -200,7 +200,7 @@ func (s *Service) validateAgainstObservation(asks []billing.Ask, services []mesh
 	if len(asks) > 256 {
 		return errors.New("too many asks (max 256)")
 	}
-	known := knownModelsByService(services)
+	known := AdvertisedModelsByService(services)
 	seen := make(map[string]bool, len(asks))
 	for _, a := range asks {
 		if a.Service == "" || a.Model == "" {
@@ -222,7 +222,7 @@ func (s *Service) validateAgainstObservation(asks []billing.Ask, services []mesh
 	return nil
 }
 
-func knownModelsByService(services []mesh.ServiceObservation) map[string]map[string]bool {
+func AdvertisedModelsByService(services []mesh.ServiceObservation) map[string]map[string]bool {
 	known := make(map[string]map[string]bool, len(services))
 	for _, svc := range services {
 		if svc.Name == "" {

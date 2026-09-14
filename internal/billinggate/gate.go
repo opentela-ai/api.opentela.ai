@@ -50,7 +50,13 @@ type Service struct {
 	mode   config.BillingMode
 	output int // BILLING_OUTPUT_TOKEN_MAX; zero means no operator cap
 	feeBps int
-	now    func() time.Time
+	// requirePricedPeer is the BILLING_REQUIRE_PRICED_PEER posture: when set,
+	// a peer with no live ask is excluded from the affordable set for any
+	// (service, model) that has at least one published ask, instead of being
+	// eligible at a zero quote (free). Routes with no live asks keep the
+	// original behavior so a cold market still boots.
+	requirePricedPeer bool
+	now               func() time.Time
 	// getSnap is an injection point for tests; in production it is nil and the
 	// gate uses s.snap.Snapshot.
 	getSnap func(context.Context) (*peers.Snapshot, error)
@@ -67,10 +73,12 @@ type BillingStore interface {
 }
 
 // New returns a Service. mode == BillingOff is a pass-through wrapper.
-func New(store BillingStore, snap *peers.Service, mode config.BillingMode, outputMax, feeBps int) *Service {
+// requirePricedPeer toggles the BILLING_REQUIRE_PRICED_PEER posture (see the
+// Service field comment).
+func New(store BillingStore, snap *peers.Service, mode config.BillingMode, outputMax, feeBps int, requirePricedPeer bool) *Service {
 	return &Service{
 		store: store, snap: snap, mode: mode, output: outputMax,
-		feeBps: feeBps, now: time.Now,
+		feeBps: feeBps, requirePricedPeer: requirePricedPeer, now: time.Now,
 	}
 }
 
@@ -288,12 +296,23 @@ func (s *Service) resolveQuotes(ctx context.Context, plan gate.Plan, caps billin
 		if !billing.BillableProvider(sellerAccount, ownerWallet) {
 			continue
 		}
+		a, priced := askByPeer[peerID]
 		q := billing.EligiblePeerQuote{PeerID: peerID, SellerAccountID: sellerAccount, OwnerWallet: ownerWallet}
-		if a, ok := askByPeer[peerID]; ok {
+		if priced {
 			q.Revision = a.Revision
 			q.InputPerMillion = a.InputPerMillion
 			q.CachedInputPerMillion = a.CachedInputPerMillion
 			q.OutputPerMillion = a.OutputPerMillion
+		}
+		// An unpriced peer is eligible at a zero quote by default (no price,
+		// the request is free). When the operator requires priced peers and
+		// the market has priced this route at all, an unpublished peer is
+		// excluded instead — a seller who never published (or whose asks
+		// expired) must not silently serve free traffic once priced peers
+		// exist. Routes with no live asks keep the original behavior so a
+		// cold market still boots.
+		if s.requirePricedPeer && !priced && len(asks) > 0 {
+			continue
 		}
 		quotes = append(quotes, q)
 	}

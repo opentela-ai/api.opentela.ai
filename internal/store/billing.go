@@ -144,6 +144,41 @@ func (p *Postgres) LiveAsks(ctx context.Context, service, model string, now time
 	return out, nil
 }
 
+// LiveAsksByPeers returns the non-expired asks for the given peers, ordered
+// by (peer_id, service, model) for stable display. This is the seller-side
+// read behind GET /manage/billing/asks (the console pricing panel); the
+// buyer-side read is LiveAsks (per service/model).
+func (p *Postgres) LiveAsksByPeers(ctx context.Context, peerIDs []string, now time.Time) ([]billing.Ask, error) {
+	if len(peerIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT peer_id, service, model, input_per_million, cached_input_per_million,
+		       output_per_million, revision, expires_at, updated_at
+		FROM peer_asks
+		WHERE peer_id = ANY($1) AND expires_at > $2
+		ORDER BY peer_id ASC, service ASC, model ASC`,
+		peerIDs, now)
+	if err != nil {
+		return nil, fmt.Errorf("store: live asks by peers: %w", err)
+	}
+	defer rows.Close()
+	var out []billing.Ask
+	for rows.Next() {
+		var a billing.Ask
+		if err := rows.Scan(&a.PeerID, &a.Service, &a.Model, &a.InputPerMillion,
+			&a.CachedInputPerMillion, &a.OutputPerMillion, &a.Revision,
+			&a.ExpiresAt, &a.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store: live asks by peers: scan: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: live asks by peers: rows: %w", err)
+	}
+	return out, nil
+}
+
 // EnsureAccountCredit creates the account's zero-balance row if it does not
 // already exist. Safe to call concurrently and on every request.
 func (p *Postgres) EnsureAccountCredit(ctx context.Context, accountID string) error {

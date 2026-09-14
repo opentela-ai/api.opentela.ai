@@ -513,6 +513,12 @@ Management APIs:
 - `POST /manage/billing/withdrawals` (requires `Idempotency-Key`)
 - `GET /manage/billing/withdrawals?cursor=...`
 - `GET /manage/billing/withdrawals/{id}`
+- `GET /manage/billing/asks` — the seller pricing surface: per owned
+  instance, the live asks (three rates, revision, `expires_at`), the
+  advertised routes with no live ask (`unpriced_routes`, i.e. currently
+  eligible at a zero quote), billable/online/advertisement freshness flags,
+  and the out-of-band publication contract (`ask_ttl_seconds`,
+  `republish_seconds`, `publication_endpoint`).
 
 All raw monetary values on these JSON APIs are decimal strings, including
 balances, ledger deltas, deposits, and withdrawal amounts. This is a wire
@@ -527,25 +533,92 @@ splits `cost_raw` into `seller_raw = cost_raw - floor(cost_raw * fee_bps /
 and withdrawable by OpenTela's operator. **Setting the fee is the only pricing
 OpenTela does** — a take-rate on a market price, not a price of inference.
 
-## 11. Mainnet evolution: non-custodial settlement (deferred)
+## 11. Phase 2 design: non-custodial settlement (decided)
 
 When OTELA has real value, remove the custodial treasury from the critical
-path. The market mechanism (asks, bids, matching, the ledger) is **unchanged**;
-only the settlement rails change:
+path. The market mechanism (asks, matching, the meter, the ledger) is
+**unchanged**; only the settlement rails change. This section records the
+decided design (tracking issue #6).
 
-1. **One-time delegation.** Each buyer signs an SPL `approve` naming OpenTela's
-   billing wallet as a delegated spender of their OTELA ATA, up to a cap.
+### 11.1 Primitive decision: SPL token delegation
+
+Three candidates were considered:
+
+| Candidate | Verdict | Why |
+|---|---|---|
+| **SPL token delegation (`approve` → settlement authority)** | **Chosen** | A native SPL instruction (no custom program, no upgrade authority to audit); revocable at any time by re-`approve`ing `0`; the allowance cap is enforced by the token program itself, so the buyer's maximum exposure is the allowance, never their balance. Maps 1:1 onto the existing reserve model: remaining allowance ≈ `credit_raw − reserved_raw`. |
+| Per-epoch escrow PDA | Rejected | Requires a custom program to release/draw partially (native SPL cannot), i.e. the audit surface we deferred Phase 2 to avoid; locks funds for a full epoch; refunds need another program path. |
+| Session keys / limited spenders | Rejected as the rail | Useful later as a UX layer (batched micro-approvals) but they still need a settlement program to enforce per-request limits on-chain; nothing in the SPL token program enforces spend shapes. |
+
+Delegation keeps the trust model strictly better than custody: the platform
+holds a **delegated spending right up to a buyer-chosen cap**, not the
+funds. Buyers can revoke instantly, and a compromised settlement key
+exposes at most the sum of outstanding allowances — bounded, detectable
+(allowance drift vs ledger), and smaller than a hot treasury.
+
+### 11.2 On-chain accounts
+
+| Account | Owner / program | Role |
+|---|---|---|
+| Buyer OTELA ATA | SPL Token | Source of settlement funds; buyer keeps custody. |
+| Seller OTELA ATA | SPL Token | Settlement destination (payouts go peer-to-peer). |
+| Settlement authority | ed25519 keypair held by the settlement worker (HSM/KMS in production) | The **delegate** named by every buyer's `approve`; signs batched `transfer_checked` instructions from buyer ATAs. Distinct from the treasury keypair (§13) so custodial and non-custodial rails never share a signer. |
+| Allowance registry (off-chain) | Postgres | `(buyer_account, delegate, allowance_raw, approved_at, revoked_at)` mirroring the chain; the gate's reserve check consults it instead of `credit_raw`. |
+
+Settlement uses `transfer_checked` (mint-decimals-checked) — never raw
+`transfer` — so a mint mismatch fails loudly. Each batched transfer carries
+the idempotency ref of the ledger legs it settles (same `UNIQUE(ref, leg)`
+exactly-once model as §6), making on-chain settlement a replay of the
+already-exact off-chain ledger, not a second accounting system.
+
+### 11.3 Gate semantics under delegation
+
+- The conservative reserve (§5) is unchanged, but bounded by
+  `min(credit_raw, remaining_allowance)` instead of `credit_raw`.
+- A buyer whose allowance is exhausted mid-epoch fails like an
+  insufficient-balance buyer today (`enforce`) / degrades to unpriced-free
+  behavior only per `BILLING_REQUIRE_PRICED_PEER` policy.
+- Freshness: the settlement worker re-reads on-chain allowances every
+  `BILLING_ALLOWANCE_REFRESH` (new flag, default `60s`); a chain-side
+  revocation takes effect within that window, the same staleness class as
+  the deposit watcher's poll cadence.
+
+### 11.4 Migration and coexistence with the custodial ledger
+
+1. **Ledger stays the source of truth for accounting.** `credit_ledger`
+   rows, caps, metering, and the manage API are identical in both modes;
+   only how a credit balance is *backed on-chain* differs.
+2. **Funding source becomes a per-account attribute**: `funding =
+   'deposit'` (today) or `'delegation'`. A buyer may hold both; the gate
+   bounds spend by the sum of available backing.
+3. **Deposits become optional once delegation ships**: a buyer can go
+   straight to `approve` + spend; the deposit path remains for buyers who
+   prefer prepaying without granting any delegation.
+4. **Withdrawals** keep their current reserve/confirm flow for custodial
+   balances; delegation-backed spend never touches the treasury, so there
+   is nothing to withdraw from that rail.
+5. **Cutover is per-account and reversible**: flipping `funding` requires
+   only the buyer's on-chain `approve`/`revoke`; no migration touches
+   historical ledger rows.
+
+### 11.5 Flow summary
+
+1. **One-time delegation.** Each buyer signs an SPL `approve` naming the
+   settlement authority as delegate of their OTELA ATA, up to a cap.
 2. **Off-chain metering is identical** (§5). The ledger debits the buyer and
    credits the seller exactly as before.
-3. **Periodic on-chain settlement.** A worker sends batched `transfer`s from
-   buyers' ATAs to sellers' ATAs using the delegated allowances — directly,
-   peer to peer, never through a treasury the API controls.
+3. **Periodic on-chain settlement.** The settlement worker sends batched
+   `transfer_checked`s from buyers' ATAs to sellers' ATAs within the
+   delegated allowances — directly, peer to peer, never through a treasury
+   the API controls.
 4. **Netting** within a batch reduces on-chain load.
-5. **Reconciliation:** a periodic Merkle root of the ledger lets users verify
-   their balance independently.
+5. **Reconciliation:** a periodic Merkle root of the ledger lets users
+   verify their balance independently; allowance registry vs on-chain
+   delegate amounts is cross-checked on the same cadence.
 
-The custodial MVP (§3–§9) reaches this with **no changes** to the gate, meter,
-asks, or ledger — only the deposit/withdrawal rails (§7, §8) are replaced.
+The custodial MVP (§3–§9) reaches this with **no changes** to the gate,
+meter, asks, or ledger — only the deposit/withdrawal rails (§7, §8) gain a
+delegation-backed alternative.
 
 ## 12. Failure modes
 
@@ -576,6 +649,7 @@ asks, or ledger — only the deposit/withdrawal rails (§7, §8) are replaced.
 | `BILLING_RPC_URL` | — | Solana RPC for deposits/withdrawals (reuses faucet client) |
 | `BILLING_OUTPUT_TOKEN_MAX` | per route | Conservative output-token ceiling for generative routes |
 | `BILLING_POLL_INTERVAL` | `2s` | Deposit/withdrawal poll cadence |
+| `BILLING_REQUIRE_PRICED_PEER` | `false` | When true, a peer with no live ask is excluded from the affordable set for any `(service, model)` that has at least one published ask, instead of being eligible at a zero quote (free). Routes with no live asks keep the original behavior so a cold market still boots. |
 
 `BILLING_MODE = enforce` is the production posture. `observe` runs the gate and
 meter without rejecting requests, so the operator can validate pricing and
@@ -615,3 +689,6 @@ usage against real traffic before flipping the switch.
 | 5 — Deposits | ✅ Done | Finalized Solana polling, persist-before-credit events, wallet-link reconciliation, and a durable CAS high-water cursor with retry-safe oldest-first processing. |
 | 6 — Management API + UI | ✅ Done | Billing state, caps, decimal-string raw amounts, ledger/deposit pagination, wallet panel, and three-tier catalog market view. |
 | 7 — Withdrawals | ✅ Done | Capability-gated, primary-wallet-bound reserve flow; durable signed/broadcast/finalized states; last-valid-block-height expiry proof; bigint-safe UI. |
+| 8 — Market operability (issues #1/#2) | ✅ Done | Reference ask-publisher (`cmd/askpublish` + `internal/askpublish`: pricing challenge → sign → issue, 2-minute republish loop), and `BILLING_REQUIRE_PRICED_PEER` so a peer with no live ask is excluded from the affordable set for priced routes instead of serving free. |
+| 9 — Price-aware routing (issue #3, Phase 1 market signal) | ✅ Done | The gate's `X-Otela-Allowed-Peers` stamp is cheapest-first; the mesh head (`opentela-ai/OpenTela`) weights selection by `decay^rank` (`routing.price_weight_decay`, default 0 = uniform) and retries deterministically prefer the next-cheapest allowed peer. |
+| 10 — Seller pricing surface (cloud issue #1) | ✅ Done | `GET /manage/billing/asks`: live asks + unpriced advertised routes per owned instance for the console pricing panel. |

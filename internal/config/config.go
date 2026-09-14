@@ -116,6 +116,11 @@ type Config struct {
 	BillingFeeBps        int           // routing fee in basis points (0–10000) credited to the treasury on settlement
 	BillingSweepInterval time.Duration // stale-reservation recovery cadence
 	BillingSweepAge      time.Duration // a reserved request older than this is reclaimed
+	// BillingRequirePricedPeer: when true, a peer with no live ask is excluded
+	// from the affordable set for any (service, model) that has at least one
+	// published ask, instead of being eligible at a zero quote (free). Routes
+	// with no live asks keep the original behavior so a cold market boots.
+	BillingRequirePricedPeer bool
 
 	// Deposits (Step 5). The watcher polls the treasury's associated token
 	// account for finalized inbound SPL transfers of the OTELA mint and
@@ -414,6 +419,14 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A peer that never published is eligible at a zero quote by default (no
+	// price, the request is free). Requiring priced peers stops that default
+	// from silently converting a seller whose asks expired (or who never
+	// published) into free capacity once any live ask exists for the route.
+	billingRequirePricedPeer, err := boolEnv("BILLING_REQUIRE_PRICED_PEER", false)
+	if err != nil {
+		return nil, err
+	}
 
 	// Deposits (Step 5). The treasury wallet owns the associated token
 	// account that receives deposits; when unset the watcher stays off. The
@@ -541,6 +554,7 @@ func Load() (*Config, error) {
 		BillingFeeBps:                  billingFeeBps,
 		BillingSweepInterval:           billingSweepInterval,
 		BillingSweepAge:                billingSweepAge,
+		BillingRequirePricedPeer:       billingRequirePricedPeer,
 		BillingTreasuryWallet:          billingTreasury,
 		BillingSolanaRPC:               billingSolanaRPC,
 		BillingDepositMint:             billingMint,
@@ -570,6 +584,18 @@ func stringEnv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func boolEnv(key string, def bool) (bool, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean, got %q", key, v)
+	}
+	return b, nil
 }
 
 func durationEnv(key string, def time.Duration) (time.Duration, error) {

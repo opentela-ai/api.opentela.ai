@@ -530,3 +530,47 @@ func TestSweepStaleReservationsEmptyIsSafe(t *testing.T) {
 		t.Fatalf("released = %v, want []", released)
 	}
 }
+
+// TestLiveAsksByPeersRoundTrip verifies the seller-side read behind
+// GET /manage/billing/asks: only the requested peers' non-expired asks come
+// back, sorted by (peer_id, service, model), and expired rows are excluded.
+func TestLiveAsksByPeersRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	p := newTestStore(t)
+	now := time.Now().UTC()
+
+	if _, err := p.ReplaceAsks(ctx, "sp1", []billing.Ask{
+		{Service: "llm", Model: "qwen", InputPerMillion: 100, CachedInputPerMillion: 40, OutputPerMillion: 300},
+		{Service: "llm", Model: "llama", InputPerMillion: 200, CachedInputPerMillion: 60, OutputPerMillion: 600},
+	}, 5*time.Minute); err != nil {
+		t.Fatalf("replace sp1: %v", err)
+	}
+	if _, err := p.ReplaceAsks(ctx, "sp2", []billing.Ask{
+		{Service: "embed", Model: "bge", InputPerMillion: 10, CachedInputPerMillion: 0, OutputPerMillion: 0},
+	}, time.Millisecond); err != nil {
+		t.Fatalf("replace sp2: %v", err)
+	}
+
+	time.Sleep(2 * time.Millisecond) // let sp2's 1ms TTL expire
+
+	asks, err := p.LiveAsksByPeers(ctx, []string{"sp1", "sp2", "sp-unknown"}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("live asks by peers: %v", err)
+	}
+	if len(asks) != 2 {
+		t.Fatalf("got %d asks, want 2 (sp2's short TTL must have expired): %+v", len(asks), asks)
+	}
+	if asks[0].PeerID != "sp1" || asks[0].Model != "llama" || asks[1].Model != "qwen" {
+		t.Fatalf("ordering wrong (want sp1/llama then sp1/qwen): %+v", asks)
+	}
+	for _, a := range asks {
+		if a.PeerID != "sp1" {
+			t.Fatalf("unexpected peer %q in result", a.PeerID)
+		}
+	}
+
+	// Empty selector reads nothing.
+	if asks, err := p.LiveAsksByPeers(ctx, nil, now); err != nil || len(asks) != 0 {
+		t.Fatalf("empty peer list: %d asks %v, want 0 nil", len(asks), err)
+	}
+}

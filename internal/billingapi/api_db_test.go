@@ -139,7 +139,7 @@ func TestDBStateAndPreferencesRoundTrip(t *testing.T) {
 		t.Fatalf("ApplyDeposit: %v", err)
 	}
 
-	svc := billingapi.New(pg, config.BillingEnforce, "TreasuryATA", "Mint", "TokenProg", 9, true)
+	svc := billingapi.New(pg, config.BillingEnforce, "TreasuryATA", "Mint", "TokenProg", 9, true, nil)
 
 	// GET /manage/billing → seeded cap and the deposit credit.
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing", nil)
@@ -211,7 +211,7 @@ func TestDBLedgerCursorRoundTrip(t *testing.T) {
 		}
 	}
 
-	svc := billingapi.New(pg, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true)
+	svc := billingapi.New(pg, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
 
 	// First page: limit=1 → exactly one entry + a next cursor.
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/ledger?limit=1", nil)
@@ -274,7 +274,7 @@ func TestDBDepositsList(t *testing.T) {
 		t.Fatalf("ApplyDeposit d1: %v", err)
 	}
 
-	svc := billingapi.New(pg, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true)
+	svc := billingapi.New(pg, config.BillingEnforce, "ATA", "Mint", "Prog", 9, true, nil)
 	req := httptest.NewRequest(http.MethodGet, "/manage/billing/deposits", nil)
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()

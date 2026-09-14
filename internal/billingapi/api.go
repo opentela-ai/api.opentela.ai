@@ -5,6 +5,8 @@
 //   - PATCH  /manage/billing/preferences — set the three buyer caps
 //   - GET    /manage/billing/ledger     — cursor-paginated immutable ledger
 //   - GET    /manage/billing/deposits   — cursor-paginated credited deposits
+//   - GET    /manage/billing/asks       — seller pricing surface: live asks and
+//     unpriced advertised routes per owned instance
 //
 // The endpoints are JWT-authenticated by the surrounding manage router
 // (principal.Middleware); the owning account id is the Neon subject, with an
@@ -18,6 +20,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +29,11 @@ import (
 	"github.com/opentela-ai/api/internal/billing"
 	"github.com/opentela-ai/api/internal/config"
 	"github.com/opentela-ai/api/internal/httputil"
+	"github.com/opentela-ai/api/internal/mesh"
+	"github.com/opentela-ai/api/internal/pricingapi"
 	"github.com/opentela-ai/api/internal/principal"
 	"github.com/opentela-ai/api/internal/solana"
+	"github.com/opentela-ai/api/internal/store"
 )
 
 // billingStore is the subset of the billing store the management endpoints
@@ -46,6 +52,16 @@ type billingStore interface {
 	ReserveWithdrawal(ctx context.Context, req billing.WithdrawalRequest, now time.Time) (billing.Withdrawal, error)
 	Withdrawal(ctx context.Context, accountID string, id int64) (billing.Withdrawal, error)
 	ListWithdrawals(ctx context.Context, accountID string, cursor *billing.WithdrawalCursor, limit int) ([]billing.Withdrawal, *billing.WithdrawalCursor, error)
+	// Seller pricing surface (GET /manage/billing/asks): the account's own
+	// registered instances and their live asks.
+	ListInstancesByUser(ctx context.Context, accountID string) ([]store.InstanceInfo, error)
+	LiveAsksByPeers(ctx context.Context, peerIDs []string, now time.Time) ([]billing.Ask, error)
+}
+
+// SellerMesh resolves a peer's live advertisement (served services/models)
+// so the pricing panel can compute unpriced routes. Satisfied by *mesh.Client.
+type SellerMesh interface {
+	LookupPeer(ctx context.Context, peerID string) (mesh.PeerObservation, error)
 }
 
 // Service serves the billing management routes. The treasury ATA, mint,
@@ -60,6 +76,7 @@ type Service struct {
 	tokenProgram       string
 	decimals           int
 	withdrawalsEnabled bool
+	mesh               SellerMesh
 	ledgerLimit        int
 	depositLimit       int
 	now                func() time.Time
@@ -69,7 +86,7 @@ type Service struct {
 // (solana.AssociatedTokenAddress) the deposit watcher polls; mint, decimals,
 // and tokenProgram describe the OTELA token so the UI can render a valid
 // transfer and a human-readable amount.
-func New(store billingStore, mode config.BillingMode, treasuryATA, mint, tokenProgram string, decimals int, withdrawalsEnabled bool) *Service {
+func New(store billingStore, mode config.BillingMode, treasuryATA, mint, tokenProgram string, decimals int, withdrawalsEnabled bool, meshClient SellerMesh) *Service {
 	return &Service{
 		store:              store,
 		mode:               mode,
@@ -78,6 +95,7 @@ func New(store billingStore, mode config.BillingMode, treasuryATA, mint, tokenPr
 		tokenProgram:       tokenProgram,
 		decimals:           decimals,
 		withdrawalsEnabled: withdrawalsEnabled,
+		mesh:               meshClient,
 		ledgerLimit:        50,
 		depositLimit:       50,
 		now:                time.Now,
@@ -92,6 +110,7 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("PATCH /manage/billing/preferences", s.handlePreferences)
 	mux.HandleFunc("GET /manage/billing/ledger", s.handleLedger)
 	mux.HandleFunc("GET /manage/billing/deposits", s.handleDeposits)
+	mux.HandleFunc("GET /manage/billing/asks", s.handleAsks)
 	mux.HandleFunc("POST /manage/billing/withdrawals", s.handleWithdrawalsCreate)
 	mux.HandleFunc("GET /manage/billing/withdrawals", s.handleWithdrawalsList)
 	mux.HandleFunc("GET /manage/billing/withdrawals/{id}", s.handleWithdrawal)
@@ -343,6 +362,159 @@ type preferencesRequest struct {
 	MaxInputPerMillion       *int64 `json:"max_input_per_million"`
 	MaxCachedInputPerMillion *int64 `json:"max_cached_input_per_million"`
 	MaxOutputPerMillion      *int64 `json:"max_output_per_million"`
+}
+
+// --- seller pricing surface (GET /manage/billing/asks) ---
+
+// Seller-side constants mirroring the publication contract in pricingapi:
+// the server assigns a 5-minute ask TTL and sellers are expected to
+// republish roughly every two minutes. The response carries both so the
+// console can render ask freshness without hardcoding them.
+const (
+	sellerAskTTLSeconds    = int((5 * time.Minute) / time.Second)
+	sellerRepublishSeconds = int((2 * time.Minute) / time.Second)
+	// maxPricedInstances bounds the per-request mesh lookups so a user with
+	// a pathological number of registered instances cannot fan out unbounded.
+	maxPricedInstances = 50
+)
+
+// publicationEndpoint is where asks are published out-of-band: a seller node
+// calls it with a pricing-scoped node credential (full replacement, server
+// TTL). The reference ask-publisher (cmd/askpublish) implements the loop.
+const publicationEndpoint = "POST /internal/pricing"
+
+// unpricedRoute is an advertised (service, model) pair the instance currently
+// serves with no live ask. Under BILLING_REQUIRE_PRICED_PEER=true such a
+// route is excluded from the priced market; under observe/false it is
+// eligible at a zero quote — i.e. serving traffic for free.
+type unpricedRoute struct {
+	Service string `json:"service"`
+	Model   string `json:"model"`
+}
+
+// instancePricing is one owned instance's seller pricing state.
+type instancePricing struct {
+	PeerID      string `json:"peer_id"`
+	Label       string `json:"label"`
+	OwnerWallet string `json:"owner_wallet,omitempty"`
+	// Billable mirrors the gate's routing predicate (credit account + owner
+	// wallet): false means the market will not credit this instance.
+	Billable bool `json:"billable"`
+	// Online/ObservedAt come from the live mesh observation;
+	// AdvertisementKnown is false when the lookup failed (unpriced routes
+	// cannot be computed without the advertisement).
+	Online             bool            `json:"online"`
+	ObservedAt         *time.Time      `json:"observed_at,omitempty"`
+	AdvertisementKnown bool            `json:"advertisement_known"`
+	Asks               []billing.Ask   `json:"asks"`
+	UnpricedRoutes     []unpricedRoute `json:"unpriced_routes"`
+}
+
+// asksResponse is the GET /manage/billing/asks payload. Asks embed their
+// revision and expires_at; freshness = expires_at - now, with republish
+// every republish_seconds while the node is live.
+type asksResponse struct {
+	Now                 time.Time         `json:"now"`
+	AskTTLSeconds       int               `json:"ask_ttl_seconds"`
+	RepublishSeconds    int               `json:"republish_seconds"`
+	PublicationEndpoint string            `json:"publication_endpoint"`
+	Instances           []instancePricing `json:"instances"`
+}
+
+// handleAsks serves the seller pricing panel: per owned instance, the live
+// asks (service, model, three rates, revision, expiry) and the advertised
+// routes that currently have no ask (the "serving for free" view).
+func (s *Service) handleAsks(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	resp := asksResponse{
+		Now:                 s.now().UTC(),
+		AskTTLSeconds:       sellerAskTTLSeconds,
+		RepublishSeconds:    sellerRepublishSeconds,
+		PublicationEndpoint: publicationEndpoint,
+		Instances:           []instancePricing{},
+	}
+	if s.mode == config.BillingOff {
+		// No market in off mode: an empty (but well-formed) payload so the
+		// console renders a graceful "billing disabled" state.
+		httputil.WriteJSON(w, http.StatusOK, resp)
+		return
+	}
+	instances, err := s.store.ListInstancesByUser(r.Context(), accountID)
+	if err != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if len(instances) > maxPricedInstances {
+		instances = instances[:maxPricedInstances]
+	}
+	peerIDs := make([]string, 0, len(instances))
+	for _, in := range instances {
+		peerIDs = append(peerIDs, in.PeerID)
+	}
+	asksByPeer := make(map[string][]billing.Ask, len(instances))
+	if len(peerIDs) > 0 {
+		asks, err := s.store.LiveAsksByPeers(r.Context(), peerIDs, s.now())
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		for _, a := range asks {
+			asksByPeer[a.PeerID] = append(asksByPeer[a.PeerID], a)
+		}
+	}
+	for _, in := range instances {
+		ip := instancePricing{
+			PeerID:      in.PeerID,
+			Label:       in.Label,
+			OwnerWallet: in.OwnerWallet,
+			Billable:    billing.BillableProvider(in.AccountID, in.OwnerWallet),
+			Asks:        asksByPeer[in.PeerID],
+		}
+		if ip.Asks == nil {
+			ip.Asks = []billing.Ask{}
+		}
+		ip.UnpricedRoutes = []unpricedRoute{}
+		if s.mesh != nil {
+			if obs, err := s.mesh.LookupPeer(r.Context(), in.PeerID); err == nil {
+				ip.Online = obs.Online
+				observedAt := obs.ObservedAt
+				ip.ObservedAt = &observedAt
+				ip.AdvertisementKnown = true
+				ip.UnpricedRoutes = unpricedRoutes(obs.Services, ip.Asks)
+			}
+		}
+		resp.Instances = append(resp.Instances, ip)
+	}
+	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// unpricedRoutes computes the advertised (service, model) pairs that have no
+// live ask, sorted for stable display. Mirrors pricingapi's publication
+// validation: only specific model= groups count as routable pairs (wildcards
+// and catch-alls are not priceable identities).
+func unpricedRoutes(services []mesh.ServiceObservation, asks []billing.Ask) []unpricedRoute {
+	asked := make(map[string]bool, len(asks))
+	for _, a := range asks {
+		asked[a.Service+"\x00"+a.Model] = true
+	}
+	var out []unpricedRoute
+	for svc, models := range pricingapi.AdvertisedModelsByService(services) {
+		for model := range models {
+			if !asked[svc+"\x00"+model] {
+				out = append(out, unpricedRoute{Service: svc, Model: model})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Service != out[j].Service {
+			return out[i].Service < out[j].Service
+		}
+		return out[i].Model < out[j].Model
+	})
+	return out
 }
 
 func (s *Service) handlePreferences(w http.ResponseWriter, r *http.Request) {
