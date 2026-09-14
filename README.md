@@ -593,6 +593,10 @@ membership revision, and fresh ownership.
 | `FAUCET_WALLET_KEYPAIR`       | no*     | —       | Base64 Ed25519 seed/private key of the funded faucet wallet |
 | `FAUCET_AMOUNT`               | no      | `1000000` | Per-claim payout in token base units (1 OTELA @ 6 decimals) |
 | `FAUCET_DECIMALS`             | no      | `6`      | Token decimals, used for display and JSON output  |
+| `SOLANA_RPC_PROXY_UPSTREAM`   | no      | billing/faucet RPC | Upstream node for `POST /solana-rpc` (browser JSON-RPC proxy). Empty disables the route |
+| `SOLANA_RPC_PROXY_METHODS`    | no      | wallet+swap read/tx set | Comma-separated JSON-RPC method allowlist override |
+| `SOLANA_RPC_PROXY_RATE_RPS`   | no      | `20`     | Per-client-IP token bucket refill (calls/sec) |
+| `SOLANA_RPC_PROXY_BURST`      | no      | `40`     | Per-client-IP burst size |
 
 \* `NEON_AUTH_JWKS_URL` and `NEON_AUTH_ISSUER` must be set together — setting
 only one is a config error. Setting neither leaves key management disabled.
