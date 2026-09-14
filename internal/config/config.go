@@ -327,11 +327,11 @@ func Load() (*Config, error) {
 	faucetMint := os.Getenv("FAUCET_MINT")
 	faucetRPC := os.Getenv("FAUCET_SOLANA_RPC_URL")
 	faucetTokenProgram := stringEnv("FAUCET_TOKEN_PROGRAM", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-	faucetAmount, err := uint64Env("FAUCET_AMOUNT", 1_000_000_000) // 1 OTELA at 9 decimals
+	faucetAmount, err := uint64Env("FAUCET_AMOUNT", 1_000_000) // 1 OTELA at 6 decimals
 	if err != nil {
 		return nil, err
 	}
-	faucetDecimals, err := intEnv("FAUCET_DECIMALS", 9)
+	faucetDecimals, err := intEnv("FAUCET_DECIMALS", 6)
 	if err != nil {
 		return nil, err
 	}
