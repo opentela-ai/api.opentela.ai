@@ -58,7 +58,20 @@ type stubStore struct {
 	instancesErr error
 	asksIn       []string
 	asksOut      []billing.Ask
-	asksErr      error
+	// §11.5.5 reconciliation surface.
+	rec        billing.Reconciliation
+	recErr     error
+	merkle     billing.MerkleSummary
+	merkleErr  error
+	proofLeaf  []byte
+	proofPath  [][]byte
+	proofRoot  []byte
+	proofCount int
+	proofErr   error
+	indexOut   int
+	indexOK    bool
+	indexErr   error
+	asksErr    error
 }
 
 func (s *stubStore) ListInstancesByUser(_ context.Context, accountID string) ([]store.InstanceInfo, error) {
@@ -134,6 +147,36 @@ func (s *stubStore) Withdrawal(_ context.Context, _ string, id int64) (billing.W
 func (s *stubStore) ListWithdrawals(_ context.Context, _ string, cursor *billing.WithdrawalCursor, _ int) ([]billing.Withdrawal, *billing.WithdrawalCursor, error) {
 	s.listWCursor = cursor
 	return s.listWOut, s.listWNext, s.listWErr
+}
+
+// §11.5.5 reconciliation surface (canned).
+func (s *stubStore) ReconcileAccount(context.Context, string, time.Time) (billing.Reconciliation, error) {
+	return s.rec, s.recErr
+}
+func (s *stubStore) AccountMerkleSummary(context.Context, string) (billing.MerkleSummary, error) {
+	return s.merkle, s.merkleErr
+}
+func (s *stubStore) MerkleProofForLedgerRow(context.Context, string, int64) ([]byte, [][]byte, []byte, int, error) {
+	if s.proofErr != nil {
+		return nil, nil, nil, 0, s.proofErr
+	}
+	return s.proofLeaf, s.proofPath, s.proofRoot, s.proofCount, nil
+}
+func (s *stubStore) LedgerLeafIndex(context.Context, string, int64) (int, bool, error) {
+	return s.indexOut, s.indexOK, s.indexErr
+}
+
+// §11.5.5 reconciliation surface (canned).
+type stubReconciler struct {
+	report billing.ReconciliationReport
+	err    error
+}
+
+func (r *stubReconciler) Report(context.Context, string) (billing.ReconciliationReport, error) {
+	if r.err != nil {
+		return billing.ReconciliationReport{}, r.err
+	}
+	return r.report, nil
 }
 
 type verifierStub struct{ sub string }

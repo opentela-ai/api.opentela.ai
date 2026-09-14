@@ -417,6 +417,56 @@ func DelegationSettlementRef(id int64) string {
 	return "delegation-settlement:" + strconv.FormatInt(id, 10)
 }
 
+// MerkleSummary is the §11.5.5 ledger commitment: the deterministic Merkle
+// root over the account's credit_ledger rows (ascending id) and the row
+// count. A user recomputes it from their own ledger copy and compares.
+type MerkleSummary struct {
+	Root      []byte
+	LeafCount int64
+}
+
+// AllowanceCrossCheck is one registry row audited against the chain
+// (§11.5.5): the registry's allowance minus in-flight settlements is what
+// the chain's delegated amount should read; divergence beyond zero means
+// the buyer moved the delegation outside what this API has mirrored.
+type AllowanceCrossCheck struct {
+	Delegate string
+	Active   bool
+	// RegistryAllowanceRaw is the registry's allowance_raw.
+	RegistryAllowanceRaw int64
+	// InFlightRaw is the sum of not-yet-finalized settlement batches for
+	// this (account, delegate) — consumed from the registry but not yet
+	// confirmed on-chain, so the chain should read allowance − in-flight.
+	InFlightRaw int64
+	// ExpectedChainRaw = RegistryAllowanceRaw − InFlightRaw.
+	ExpectedChainRaw int64
+	// ObservedChainRaw is what the chain actually reads; nil when the read
+	// failed (transient RPC) or the account has no linked wallet/ATA.
+	ObservedChainRaw *int64
+	// DivergenceRaw = Observed − Expected; nil when no observation.
+	DivergenceRaw *int64
+}
+
+// ExposureSummary is the residual exposure (§11.5.5, §16 row 14): settled
+// charges whose on-chain collection failed terminally (restored batches —
+// the platform credited the seller off-chain but could not collect from
+// the buyer on-chain).
+type ExposureSummary struct {
+	RestoredCount int64
+	RestoredRaw   int64
+}
+
+// ReconciliationReport is the full §11.5.5 audit for one account: ledger
+// integrity (credit vs SUM), the Merkle commitment, the registry-vs-chain
+// cross-check per delegation, and the residual exposure.
+type ReconciliationReport struct {
+	AccountID  string
+	Ledger     Reconciliation
+	Merkle     MerkleSummary
+	Allowances []AllowanceCrossCheck
+	Exposure   ExposureSummary
+}
+
 // WithdrawalCursor is the stable, opaque pagination cursor over an account's
 // withdrawals, newest-first: the (reserved_at, id) of the last entry
 // returned. A nil cursor starts from the newest row.

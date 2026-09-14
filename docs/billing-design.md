@@ -624,6 +624,40 @@ already-exact off-chain ledger, not a second accounting system.
    verify their balance independently; allowance registry vs on-chain
    delegate amounts is cross-checked on the same cadence.
 
+   Implemented in `internal/billing/merkle.go` + `internal/delegations`
+   `Reconciler`, surfaced at `GET /manage/billing/reconciliation` and
+   `GET /manage/billing/merkle-proof?leaf_id=N`:
+
+   - **Merkle commitment.** Every `credit_ledger` row hashes to a leaf
+     (`SHA-256` over a length-prefixed, unambiguous encoding of id, delta,
+     source, leg, counterparty, ref, timestamp — domains
+     `otela-ledger-leaf:v1` / `otela-merkle-node:v1` /
+     `otela-merkle-pad:v1`), padded to a power of two with a fixed pad hash.
+     The root plus leaf count is the account's balance commitment; a user
+     holding their ledger copy (the ledger endpoint serves every row)
+     recomputes the root and compares. Row-level inclusion proofs are
+     served per leaf (`billing.MerklePath` / `VerifyMerklePath`), so a
+     single charge can be proven against the published root without
+     trusting the API. Proof construction is O(n) per request (the console
+     caches roots); roots are deterministic, so any recomputation must
+     match byte-for-byte.
+   - **Registry-vs-chain cross-check.** For each registry row, expected
+     chain amount = `allowance_raw − in-flight` (in-flight = consumed at
+     claim but not yet finalized); the chain's `getAccountInfo` delegation
+     read is compared and divergence reported per delegate. The poller
+     (§11.3) *corrects* drift continuously; this *measures and publishes*
+     it. An RPC failure degrades only the observed/divergence fields to
+     null — the report never lies about what it could not see.
+   - **Residual exposure.** Settlements that terminally failed on-chain
+     (`restored`/`failed`) are summed per account: charges the platform
+     credited to sellers but could not collect from the buyer's ATA. This
+     is the §16 step-14 residual the worker deliberately does not hide.
+   - **Cadence.** The endpoints are pure reads (plus one RPC round trip
+     per account); a cron or the console drives them. The ledger integrity
+     half (credit vs `SUM(ledger)`, §5's `ReconcileAccount`) is served even
+     without a settlement authority configured — delegation-dependent
+     sections appear once `BILLING_SETTLEMENT_AUTHORITY` is set.
+
 The custodial MVP (§3–§9) reaches this with **no changes** to the gate,
 meter, asks, or ledger — only the deposit/withdrawal rails (§7, §8) gain a
 delegation-backed alternative.
@@ -708,3 +742,4 @@ usage against real traffic before flipping the switch.
 | 12 — Delegation registry + gate bound (Phase 2, §11 increment 1) | ✅ Done | `migrations/0011_delegation.sql` (allowance registry + `delegation` ledger source), `billing.Allowance/AllowanceChange/DelegationAvailable`, `store.UpsertAllowance` (registry upsert + exactly-once credit mirror via `(ref, leg)`; revocations clamp at `reserved_raw` with the shortfall reported), reserve gate bounded by `min(credit available, Σ active allowances)` inside the lock, `GET /manage/billing` reports `allowances`. |
 | 13 — Allowance poller (Phase 2, §11 increment 2a) | ✅ Done | `internal/delegations` mirrors on-chain SPL delegations into the registry on `BILLING_ALLOWANCE_REFRESH` (`BILLING_SETTLEMENT_AUTHORITY` gates it): grants credit, revocations (ATA gone / delegate cleared / moved elsewhere) clamp — written only when we hold an active row, so never-delegated accounts poll for free. `solana.RPCClient.TokenDelegation` reads the parsed ATA (`delegate`, `delegatedAmount`, slot). `store.ConsumeAllowance` maintains the registry==chain invariant the worker will rely on so consumption is never misread as a revoke. On-chain batched `transfer_checked` settlement worker = increment 2b. |
 | 14 — Settlement worker (Phase 2, §11 increment 2b) | ✅ Done | `internal/delegations.SettlementWorker` + `migrations/0012_delegation_settlements.sql` (durable `pending → signed → broadcast → finalized` batches with the withdrawal worker's expiry-proof restore). Claim pass: earn legs (buyer-side) with an active allowance are netted per (buyer, destination) — seller share buyer→seller, fee buyer→treasury — allowance consumed atomically at claim inside one tx with the batch rows, leg anchors (`UNIQUE ledger_leg_id` = exactly-once), and cursor advance; buyers with no/unlinked/insufficient authority are skipped (deposit rail keeps them). Sign/broadcast/finalize mirrors withdrawals incl. `SKIP LOCKED` replica safety and ambiguous-send retry; restore refunds the registry allowance (the on-chain authority is still there). `transfer_checked` (discriminant 12, decimals-verified) signed by `BILLING_SETTLEMENT_KEYPAIR`, which must equal `BILLING_SETTLEMENT_AUTHORITY` on boot and holds SOL for fees. Residual exposure (buyer ATA drained under the delegation) is §11.5.5's reconciliation domain. |
+| 15 — Reconciliation (Phase 2, §11.5.5) | ✅ Done | `internal/billing/merkle.go` (deterministic domain-separated Merkle tree over `credit_ledger`, power-of-two pad, verified for all sizes 1–16 × every index × tamper) + `internal/delegations.Reconciler` + `store/reconciliation.go` (paged leaves, row-index lookup, in-flight and restored-batch sums). Endpoints: `GET /manage/billing/reconciliation` (ledger integrity + Merkle root + per-delegate registry-vs-chain cross-check with `expected = allowance − in-flight` + residual-exposure totals; `chain_audited` false until a settlement authority is configured) and `GET /manage/billing/merkle-proof?leaf_id=N` (leaf, audit path, root, index — hex). Wired in `cmd/server` when the authority is set; on-demand reads, cron/console driven. Also fixed: `RestoreSettlement`/`scanSettlement` crashed scanning NULL wire columns on pending batches. |

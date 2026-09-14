@@ -424,11 +424,23 @@ func scanSettlement(row pgx.Row) (billing.DelegationSettlement, error) {
 	var s billing.DelegationSettlement
 	var state string
 	var failReason *string
+	// signed_wire / signature / blockhash are NULLable (pending rows) —
+	// scan via pointers so a pending restore doesn't crash.
+	var signedWire, signature, blockhash *string
 	err := row.Scan(&s.ID, &s.BatchRef, &s.BuyerAccount, &s.Delegate, &s.SourceATA, &s.DestinationWallet, &s.DestinationATA,
-		&s.AmountRaw, &state, &s.SignedWire, &s.Signature, &s.Blockhash,
+		&s.AmountRaw, &state, &signedWire, &signature, &blockhash,
 		&s.LastValidBlockHeight, &s.BlockhashExpiresAt, &failReason, &s.CreatedAt)
 	if err != nil {
 		return s, err
+	}
+	if signedWire != nil {
+		s.SignedWire = *signedWire
+	}
+	if signature != nil {
+		s.Signature = *signature
+	}
+	if blockhash != nil {
+		s.Blockhash = *blockhash
 	}
 	if failReason != nil {
 		s.Error = *failReason
@@ -501,21 +513,33 @@ func (p *Postgres) RestoreSettlement(ctx context.Context, id int64, reason strin
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var s billing.DelegationSettlement
-	var state string
 	var failReason *string
+	var signedWire, signature, blockhash *string
 	err = tx.QueryRow(ctx, `
 		SELECT `+settlementColumns+`
 		FROM delegation_settlements WHERE id = $1 FOR UPDATE`, id).Scan(
 		&s.ID, &s.BatchRef, &s.BuyerAccount, &s.Delegate, &s.SourceATA, &s.DestinationWallet, &s.DestinationATA,
-		&s.AmountRaw, &state, &s.SignedWire, &s.Signature, &s.Blockhash,
+		&s.AmountRaw, &s.State, &signedWire, &signature, &blockhash,
 		&s.LastValidBlockHeight, &s.BlockhashExpiresAt, &failReason, &s.CreatedAt)
+	if signedWire != nil {
+		s.SignedWire = *signedWire
+	}
+	if signature != nil {
+		s.Signature = *signature
+	}
+	if blockhash != nil {
+		s.Blockhash = *blockhash
+	}
+	if failReason != nil {
+		s.Error = *failReason
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("store: restore settlement: %w", err)
 	}
-	st := billing.DelegationSettlementState(state)
+	st := s.State
 	if st != billing.SettlementPending && st != billing.SettlementSigned && st != billing.SettlementBroadcast {
 		return false, nil // terminal already
 	}
