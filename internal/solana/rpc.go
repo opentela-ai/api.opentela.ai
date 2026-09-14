@@ -226,6 +226,21 @@ type tokenTransferInfo struct {
 	Amount      string `json:"amount"`
 }
 
+// tokenTransferCheckedInfo is the SPL Token "transferChecked" parsed.info.
+// Wallets and most dApps build transferChecked (it embeds the mint and
+// decimals, letting receivers validate the transfer), so the deposit watcher
+// must treat it as a first-class inbound transfer. Amount lives in
+// tokenAmount.amount as an integer base-unit decimal string.
+type tokenTransferCheckedInfo struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Authority   string `json:"authority"`
+	Mint        string `json:"mint"`
+	TokenAmount struct {
+		Amount string `json:"amount"`
+	} `json:"tokenAmount"`
+}
+
 // ParsedMeta is the transaction.metadata portion needed for attribution.
 type ParsedMeta struct {
 	// Err is non-null when the transaction failed. Failed transactions never
@@ -280,8 +295,12 @@ type TokenTransfer struct {
 	AmountRaw        int64
 }
 
-// TokenTransfers returns every SPL Token "transfer" instruction for the given
-// mint and tokenProgram. An empty mint or tokenProgram skips that filter.
+// TokenTransfers returns every SPL Token "transfer" or "transferChecked"
+// instruction for the given mint and tokenProgram. An empty mint or
+// tokenProgram skips that filter. transferChecked carries the mint on the
+// instruction itself and is skipped when it does not match the mint filter;
+// plain transfers rely on the caller's pre-balance verification (the watcher
+// confirms the destination ATA and mint via the configured treasury/mint).
 // Non-token and non-transfer instructions are ignored. Transfers with an
 // invalid (non-integer) amount are skipped, as are transfers with an empty
 // source or destination.
@@ -291,14 +310,34 @@ func (t *ConfirmedTransaction) TokenTransfers(mint, tokenProgram string) []Token
 	}
 	var out []TokenTransfer
 	for i, ix := range t.Transaction.Instructions {
-		if ix.Parsed == nil || ix.Parsed.Type != "transfer" {
+		if ix.Parsed == nil {
 			continue
 		}
 		if tokenProgram != "" && ix.ProgramID != tokenProgram {
 			continue
 		}
 		var info tokenTransferInfo
-		if err := json.Unmarshal(ix.Parsed.Info, &info); err != nil {
+		switch ix.Parsed.Type {
+		case "transfer":
+			if err := json.Unmarshal(ix.Parsed.Info, &info); err != nil {
+				continue
+			}
+		case "transferChecked":
+			var checked tokenTransferCheckedInfo
+			if err := json.Unmarshal(ix.Parsed.Info, &checked); err != nil {
+				continue
+			}
+			// transferChecked names its mint; honor the mint filter directly.
+			if mint != "" && checked.Mint != mint {
+				continue
+			}
+			info = tokenTransferInfo{
+				Source:      checked.Source,
+				Destination: checked.Destination,
+				Authority:   checked.Authority,
+				Amount:      checked.TokenAmount.Amount,
+			}
+		default:
 			continue
 		}
 		if info.Source == "" || info.Destination == "" {

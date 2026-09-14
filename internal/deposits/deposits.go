@@ -52,7 +52,7 @@ type Service struct {
 	store        depositStore
 	linker       walletLinker
 	treasuryATA  string // base58, the account watched by getSignaturesForAddress
-	mint         string // base58, for tracing/diagnostics
+	mint         string // base58, filters transferChecked by mint (ATA filter covers plain transfers)
 	tokenProgram string // base58, filters which transfer instructions count
 	pollLimit    int
 	pollInterval time.Duration
@@ -243,7 +243,10 @@ func (s *Service) processSignature(ctx context.Context, sig solana.SignatureInfo
 	if tx == nil {
 		return fmt.Errorf("get transaction: missing finalized transaction")
 	}
-	transfers := tx.TokenTransfers("", s.tokenProgram)
+	// s.mint is enforced for transferChecked (which carries the mint on the
+	// instruction); plain transfers are attributed via the treasury ATA
+	// filter, which is mint-unique by construction.
+	transfers := tx.TokenTransfers(s.mint, s.tokenProgram)
 	for _, tr := range transfers {
 		if tr.Destination != s.treasuryATA {
 			continue // not an inbound deposit into the treasury ATA

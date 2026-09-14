@@ -59,6 +59,91 @@ func buildTx(slot int64, src, dst, senderOwner string, amount int64) *solana.Con
 	}
 }
 
+// buildCheckedTx builds a ConfirmedTransaction whose only token instruction
+// is an SPL Token transferChecked (the shape wallets and dApps actually send:
+// create-ATA followed by transferChecked). The mint rides on the instruction
+// itself; attribution uses preTokenBalances exactly like a plain transfer.
+func buildCheckedTx(slot int64, src, dst, senderOwner string, amount int64) *solana.ConfirmedTransaction {
+	info, _ := json.Marshal(map[string]any{
+		"source":      src,
+		"destination": dst,
+		"authority":   senderOwner,
+		"mint":        mint,
+		"tokenAmount": map[string]any{"amount": itoa64(amount), "decimals": 6},
+	})
+	return &solana.ConfirmedTransaction{
+		Slot: slot,
+		Transaction: solana.ParsedMessage{
+			AccountKeys: []string{senderOwner, src, dst, tokenProgram},
+			Instructions: []solana.ParsedIx{{
+				ProgramID: tokenProgram,
+				Parsed:    &solana.ParsedInfo{Type: "transferChecked", Info: info},
+			}},
+		},
+		Meta: &solana.ParsedMeta{
+			PreTokenBalances: []solana.TokenBalance{
+				{AccountIndex: 1, Mint: mint, Owner: senderOwner},
+			},
+		},
+	}
+}
+
+func TestRunOnceCreditsTransferChecked(t *testing.T) {
+	svc, ata := newService(t, &fakeLinker{accounts: map[string]string{"walletA": "acct-1"}})
+	rpc := svc.rpc.(*fakeRPC)
+	st := svc.store.(*fakeStore)
+
+	// Regression: the mainnet deposit 5x8geeD8… used transferChecked (wallet-
+	// built create-ATA + transferChecked), which the parser silently skipped —
+	// the cursor advanced past it and the deposit was never persisted.
+	rpc.sigs = []solana.SignatureInfo{{Signature: "sig-checked", Slot: 100, ConfirmationStatus: "finalized"}}
+	rpc.txs = map[string]*solana.ConfirmedTransaction{
+		"sig-checked": buildCheckedTx(100, "srcATA", ata, "walletA", 200_000_000),
+	}
+
+	n, err := svc.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("examined = %d, want 1", n)
+	}
+	if len(st.inserts) != 1 || st.inserts[0].AmountRaw != 200_000_000 || st.inserts[0].FromWallet != "walletA" {
+		t.Fatalf("transferChecked deposit must persist: inserts = %+v", st.inserts)
+	}
+	if len(st.applies) != 1 || st.applies[0].account != "acct-1" {
+		t.Fatalf("transferChecked deposit must credit: applies = %+v", st.applies)
+	}
+	if svc.lastSig != "sig-checked" || st.cursor != "sig-checked" {
+		t.Fatalf("cursor = %q/%q, want sig-checked", svc.lastSig, st.cursor)
+	}
+}
+
+func TestRunOnceTransferCheckedWrongMintSkipped(t *testing.T) {
+	svc, ata := newService(t, &fakeLinker{accounts: map[string]string{"walletA": "acct-1"}})
+	rpc := svc.rpc.(*fakeRPC)
+	st := svc.store.(*fakeStore)
+
+	// A transferChecked for a different mint must not be persisted — the mint
+	// rides on the instruction and the watcher filters on it directly.
+	offMintTxInfo, _ := json.Marshal(map[string]any{
+		"source": "srcATA", "destination": ata, "authority": "walletA",
+		"mint":        "SomeOtherMint11111111111111111111111111111111",
+		"tokenAmount": map[string]any{"amount": "200000000", "decimals": 6},
+	})
+	offMint := buildCheckedTx(100, "srcATA", ata, "walletA", 200_000_000)
+	offMint.Transaction.Instructions[0].Parsed = &solana.ParsedInfo{Type: "transferChecked", Info: offMintTxInfo}
+	rpc.sigs = []solana.SignatureInfo{{Signature: "sig-off-mint", Slot: 100, ConfirmationStatus: "finalized"}}
+	rpc.txs = map[string]*solana.ConfirmedTransaction{"sig-off-mint": offMint}
+
+	if _, err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.inserts) != 0 || len(st.applies) != 0 {
+		t.Fatalf("off-mint transferChecked must be skipped: inserts=%d applies=%d", len(st.inserts), len(st.applies))
+	}
+}
+
 func itoa64(i int64) string {
 	if i == 0 {
 		return "0"
