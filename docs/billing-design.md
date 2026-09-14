@@ -582,6 +582,14 @@ already-exact off-chain ledger, not a second accounting system.
   `BILLING_ALLOWANCE_REFRESH` (new flag, default `60s`); a chain-side
   revocation takes effect within that window, the same staleness class as
   the deposit watcher's poll cadence.
+- **Consumption-aware mirroring (implementation note):** the worker's own
+  `transfer_checked`s also lower the on-chain delegated amount. Those
+  observations must NOT debit credit (the charge was already debited at
+  settle time); only buyer-initiated revocations clamp the credit
+  projection. Until the worker ships, the poller treats every observed
+  decrease as a revocation — correct today because no worker consumption
+  exists; increment 2 makes the poller subtract worker-attributed
+  transfers before interpreting a drop as a revoke.
 
 ### 11.4 Migration and coexistence with the custodial ledger
 
@@ -693,3 +701,4 @@ usage against real traffic before flipping the switch.
 | 9 — Price-aware routing (issue #3, Phase 1 market signal) | ✅ Done | The gate's `X-Otela-Allowed-Peers` stamp is cheapest-first; the mesh head (`opentela-ai/OpenTela`) weights selection by `decay^rank` (`routing.price_weight_decay`, default 0 = uniform) and retries deterministically prefer the next-cheapest allowed peer. |
 | 10 — Seller pricing surface (cloud issue #1) | ✅ Done | `GET /manage/billing/asks`: live asks + unpriced advertised routes per owned instance for the console pricing panel. |
 | 11 — Single settlement rail (issue #4) | ✅ Done | The legacy mesh settlement rail (`rates.yaml` per-1000 pricing, head/worker CRDT dispute reconciliation, head-signed direct SPL transfers) is **retired and removed** from `opentela-ai/OpenTela`; `billing.enabled` now fails fast at startup with a pointer to the market. The settlement tutorial was rewritten to the market model. One rail: this gateway. |
+| 12 — Delegation registry + gate bound (Phase 2, §11 increment 1) | ✅ Done | `migrations/0011_delegation.sql` (allowance registry + `delegation` ledger source), `billing.Allowance/AllowanceChange/DelegationAvailable`, `store.UpsertAllowance` (registry upsert + exactly-once credit mirror via `(ref, leg)`; revocations clamp at `reserved_raw` with the shortfall reported), reserve gate bounded by `min(credit available, Σ active allowances)` inside the lock, `GET /manage/billing` reports `allowances`. On-chain poller + settlement worker = increment 2. |

@@ -108,6 +108,9 @@ func (s *stubStore) AccountCredit(_ context.Context, _ string) (billing.AccountC
 func (s *stubStore) PrimaryWalletForAccount(_ context.Context, _ string) (string, bool, error) {
 	return s.primaryWallet, s.primaryOK, s.primaryErr
 }
+func (s *stubStore) AccountAllowances(_ context.Context, _ string) ([]billing.Allowance, error) {
+	return nil, nil
+}
 func (s *stubStore) SetAccountCaps(_ context.Context, _ string, caps billing.Caps) (billing.AccountCredit, error) {
 	s.setCapsIn = caps
 	return s.setCapsOut, s.setCapsErr
