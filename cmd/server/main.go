@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/opentela-ai/api/internal/aclapi"
+	"github.com/opentela-ai/api/internal/askrefresh"
 	"github.com/opentela-ai/api/internal/auth"
 	"github.com/opentela-ai/api/internal/billingapi"
 	"github.com/opentela-ai/api/internal/billinggate"
@@ -219,6 +220,7 @@ func run() error {
 		log.Printf("GPU performance pipeline enabled (ClickHouse %s, database %s)", cfg.ClickHouseURL.Host, cfg.ClickHouseDatabase)
 	}
 	var sweeperDone chan struct{}
+	var askRefreshDone chan struct{}
 	var depositDone chan struct{}
 	var withdrawDone chan struct{}
 	var delegDone chan struct{}
@@ -270,6 +272,20 @@ func run() error {
 		go func() {
 			defer close(sweeperDone)
 			settlement.NewSweeper(pg, cfg.BillingSweepInterval, cfg.BillingSweepAge, 100).Run(ctx)
+		}()
+
+		// Ask refresher (§6): republishes console-managed seller asks
+		// (peer_ask_config) into the TTL'd market while the live mesh
+		// observation matches the owner — the console user's republish
+		// cadence. Sellers who prefer file-based config run cmd/askpublish
+		// instead; the two sources must not drive the same peer.
+		askRefresh := askrefresh.New(pg, meshClient, func(format string, args ...any) {
+			log.Printf("askrefresh: "+format, args...)
+		})
+		askRefreshDone := make(chan struct{})
+		go func() {
+			defer close(askRefreshDone)
+			askRefresh.Run(ctx)
 		}()
 
 		// Deposit watcher (Step 5): poll the treasury associated token
@@ -408,6 +424,12 @@ func run() error {
 			case <-sinkDone:
 			case <-time.After(12 * time.Second):
 				log.Println("perf sink flush timed out on shutdown")
+			}
+		}
+		if askRefreshDone != nil {
+			select {
+			case <-askRefreshDone:
+			case <-time.After(5 * time.Second):
 			}
 		}
 		if sweeperDone != nil {

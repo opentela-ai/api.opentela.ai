@@ -101,6 +101,41 @@ func Affordable(q EligiblePeerQuote, caps Caps) bool {
 	return true
 }
 
+// ModelCaps is a per-(service, model) buyer cap sheet (design §5). A nil
+// tier inherits the account's flat cap for that tier — a model row can
+// tighten just the output rate for an expensive model without loosening
+// anything else. The zero value means "no model row".
+type ModelCaps struct {
+	Service               string
+	Model                 string
+	InputPerMillion       *int64
+	CachedInputPerMillion *int64
+	OutputPerMillion      *int64
+}
+
+// Effective resolves the caps for one (service, model): the per-model row's
+// tiers override the flat caps tier by tier; per-request caps (already
+// folded into base by the caller's merge order) win in the caller.
+func Effective(flat Caps, rows []ModelCaps, service, model string) Caps {
+	out := flat
+	for _, r := range rows {
+		if r.Service != service || r.Model != model {
+			continue
+		}
+		if r.InputPerMillion != nil {
+			out.InputPerMillion = r.InputPerMillion
+		}
+		if r.CachedInputPerMillion != nil {
+			out.CachedInputPerMillion = r.CachedInputPerMillion
+		}
+		if r.OutputPerMillion != nil {
+			out.OutputPerMillion = r.OutputPerMillion
+		}
+		break
+	}
+	return out
+}
+
 // AccountCredit is the transactional projection of one account's balance.
 // credit_raw is the total held; reserved_raw is the sum of in-flight request
 // reservations and is a part of (not in addition to) credit_raw, so the

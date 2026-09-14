@@ -58,6 +58,15 @@ type billingStore interface {
 	// registered instances and their live asks.
 	ListInstancesByUser(ctx context.Context, accountID string) ([]store.InstanceInfo, error)
 	LiveAsksByPeers(ctx context.Context, peerIDs []string, now time.Time) ([]billing.Ask, error)
+	// Console-managed pricing: the buyer's per-model cap sheet (§5) and the
+	// seller's durable ask config with immediate publish (§6). The ask
+	// refresher (internal/askrefresh) republishes the config on cadence.
+	ModelCapsForAccount(ctx context.Context, accountID string) ([]billing.ModelCaps, error)
+	ReplaceModelCaps(ctx context.Context, accountID string, rows []billing.ModelCaps) error
+	AskConfigForPeers(ctx context.Context, peerIDs []string) (map[string][]billing.Ask, error)
+	ReplaceAskConfig(ctx context.Context, peerID string, asks []billing.Ask) error
+	GetInstanceByPeerID(ctx context.Context, peerID string) (store.InstanceInfo, error)
+	ReplaceAsks(ctx context.Context, peerID string, asks []billing.Ask, ttl time.Duration) (int64, error)
 	// Reconciliation (§11.5.5): ledger integrity, the Merkle commitment
 	// over the account's ledger, and row-level inclusion proofs.
 	ReconcileAccount(ctx context.Context, accountID string, now time.Time) (billing.Reconciliation, error)
@@ -134,6 +143,13 @@ func (s *Service) Routes() http.Handler {
 	mux.HandleFunc("GET /manage/billing/ledger", s.handleLedger)
 	mux.HandleFunc("GET /manage/billing/deposits", s.handleDeposits)
 	mux.HandleFunc("GET /manage/billing/asks", s.handleAsks)
+	// Console-managed pricing: the buyer's per-model cap sheet and the
+	// seller's durable ask config (both account-JWT authenticated).
+	mux.HandleFunc("GET /manage/billing/preferences/models", s.handleModelCapsGet)
+	mux.HandleFunc("PUT /manage/billing/preferences/models", s.handleModelCapsPut)
+	mux.HandleFunc("GET /manage/billing/asks-config", s.handleAsksConfigList)
+	mux.HandleFunc("PUT /manage/billing/asks-config/{peerID}", s.handleAsksConfigPut)
+	mux.HandleFunc("DELETE /manage/billing/asks-config/{peerID}", s.handleAsksConfigDelete)
 	mux.HandleFunc("POST /manage/billing/withdrawals", s.handleWithdrawalsCreate)
 	mux.HandleFunc("GET /manage/billing/withdrawals", s.handleWithdrawalsList)
 	mux.HandleFunc("GET /manage/billing/withdrawals/{id}", s.handleWithdrawal)

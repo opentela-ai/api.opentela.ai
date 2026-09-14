@@ -20,13 +20,15 @@ import (
 // --- stubs ---
 
 type stubStore struct {
-	credit     billing.AccountCredit
-	creditErr  error
-	asks       []billing.Ask
-	asksErr    error
-	reserved   *billing.Reservation
-	reserveErr error
-	ensured    bool
+	credit       billing.AccountCredit
+	creditErr    error
+	asks         []billing.Ask
+	asksErr      error
+	reserved     *billing.Reservation
+	reserveErr   error
+	ensured      bool
+	modelCaps    []billing.ModelCaps
+	modelCapsErr error
 }
 
 func (s *stubStore) EnsureAccountCredit(_ context.Context, _ string) error {
@@ -41,6 +43,9 @@ func (s *stubStore) SetAccountCaps(_ context.Context, _ string, _ billing.Caps) 
 }
 func (s *stubStore) LiveAsks(_ context.Context, _, _ string, _ time.Time) ([]billing.Ask, error) {
 	return s.asks, s.asksErr
+}
+func (s *stubStore) ModelCapsForAccount(_ context.Context, _ string) ([]billing.ModelCaps, error) {
+	return s.modelCaps, s.modelCapsErr
 }
 func (s *stubStore) ReserveBilling(_ context.Context, req billing.Reservation) (billing.AccountCredit, error) {
 	if s.reserveErr != nil {
@@ -573,3 +578,56 @@ func TestGateStampsRequestIDInContext(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+func TestGatePerModelCaps(t *testing.T) {
+	// Flat cap 100/M input. The buyer set a per-model row for m2 with input
+	// 5000 — m2 quotes up to 5000 are affordable even though m1 rejects the
+	// same price. Peers: peer-A sells m1 at 1000, peer-B sells m2 at 1000.
+	snap := &peers.Snapshot{Entries: map[string]peers.Entry{
+		"peer-A": {Peer: makePeer("llm", "m1", true), Instance: &store.InstanceInfo{PeerID: "peer-A", AccountID: "s-A", OwnerWallet: "w-A"}},
+		"peer-B": {Peer: makePeer("llm", "m2", true), Instance: &store.InstanceInfo{PeerID: "peer-B", AccountID: "s-B", OwnerWallet: "w-B"}},
+	}}
+	st := &stubStore{
+		credit: billing.AccountCredit{AccountID: "buyer-1", CreditRaw: 1_000_000, MaxInputPerMillion: int64Ptr(100)},
+		asks: []billing.Ask{
+			{PeerID: "peer-A", Service: "llm", Model: "m1", InputPerMillion: 1000, OutputPerMillion: 100, Revision: 1},
+			{PeerID: "peer-B", Service: "llm", Model: "m2", InputPerMillion: 1000, OutputPerMillion: 100, Revision: 1},
+		},
+		modelCaps: []billing.ModelCaps{{Service: "llm", Model: "m2", InputPerMillion: int64Ptr(5000)}},
+	}
+	s := newGate(t, config.BillingEnforce, st, snap)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	h := s.Middleware(inner)
+
+	// m1 at 1000/M: above the flat cap of 100 → rejected.
+	req := httptest.NewRequest(http.MethodPost, "/v1/service/llm/v1/chat/completions", strings.NewReader(`{"model":"m1","max_tokens":64}`))
+	req = withAccount(req, "buyer-1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("m1 above flat cap must be rejected: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// m2 at 1000/M: within the m2 model row (5000) → allowed.
+	req = httptest.NewRequest(http.MethodPost, "/v1/service/llm/v1/chat/completions", strings.NewReader(`{"model":"m2","max_tokens":64}`))
+	req = withAccount(req, "buyer-1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("m2 within model cap must be allowed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(st.reserved.Quotes) != 1 || st.reserved.Quotes[0].PeerID != "peer-B" {
+		t.Fatalf("expected peer-B reserved for m2, got %+v", st.reserved)
+	}
+
+	// Per-request caps still win over the model row: m2 with a 500 header
+	// must reject the 1000 quote.
+	req = httptest.NewRequest(http.MethodPost, "/v1/service/llm/v1/chat/completions", strings.NewReader(`{"model":"m2","max_tokens":64}`))
+	req.Header.Set("X-Max-Input-Price-Per-Million", "500")
+	req = withAccount(req, "buyer-1")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("request cap must tighten below model row: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

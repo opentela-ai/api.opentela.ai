@@ -68,6 +68,9 @@ type BillingStore interface {
 	EnsureAccountCredit(ctx context.Context, accountID string) error
 	AccountCredit(ctx context.Context, accountID string) (billing.AccountCredit, error)
 	SetAccountCaps(ctx context.Context, accountID string, caps billing.Caps) (billing.AccountCredit, error)
+	// ModelCapsForAccount is the per-(service, model) cap sheet (§5); tiers
+	// override the flat caps. Empty when the buyer never set model caps.
+	ModelCapsForAccount(ctx context.Context, accountID string) ([]billing.ModelCaps, error)
 	LiveAsks(ctx context.Context, service, model string, now time.Time) ([]billing.Ask, error)
 	ReserveBilling(ctx context.Context, req billing.Reservation) (billing.AccountCredit, error)
 }
@@ -127,7 +130,7 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, inner http.Handl
 	}
 
 	// Resolve the buyer's effective caps (account defaults + per-request).
-	caps, err := s.resolveCaps(r.Context(), buyer, hasAccount, reqCaps)
+	caps, err := s.resolveCaps(r.Context(), buyer, hasAccount, plan, reqCaps)
 	if err != nil {
 		if s.mode == config.BillingEnforce {
 			reject(w, r, http.StatusPaymentRequired, "billing_account_required")
@@ -194,9 +197,11 @@ func (s *Service) serve(w http.ResponseWriter, r *http.Request, inner http.Handl
 	inner.ServeHTTP(w, req)
 }
 
-// resolveCaps merges the buyer's stored account caps with any per-request
-// header overrides (X-Max-Input-Per-Million, etc.) parsed up front.
-func (s *Service) resolveCaps(ctx context.Context, buyer string, hasAccount bool, reqCaps billing.Caps) (billing.Caps, error) {
+// resolveCaps merges the buyer's cap layers for the requested service+model:
+// per-request header overrides (highest), then the per-model cap sheet, then
+// the account's flat caps (lowest). A per-model row overrides tier by tier,
+// so a model row can tighten just one rate without loosening the others.
+func (s *Service) resolveCaps(ctx context.Context, buyer string, hasAccount bool, plan gate.Plan, reqCaps billing.Caps) (billing.Caps, error) {
 	if !hasAccount {
 		return billing.Caps{}, billing.ErrBillingAccountRequired
 	}
@@ -208,7 +213,13 @@ func (s *Service) resolveCaps(ctx context.Context, buyer string, hasAccount bool
 	if err != nil {
 		return billing.Caps{}, err
 	}
-	return billing.MergeCaps(acctCaps(acct), reqCaps), nil
+	flat := acctCaps(acct)
+	rows, err := s.store.ModelCapsForAccount(ctx, buyer)
+	if err != nil {
+		return billing.Caps{}, err
+	}
+	modeled := billing.Effective(flat, rows, plan.Service, plan.Model)
+	return billing.MergeCaps(modeled, reqCaps), nil
 }
 
 func acctCaps(a billing.AccountCredit) billing.Caps {
