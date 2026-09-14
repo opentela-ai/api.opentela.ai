@@ -93,6 +93,34 @@ go run ./cmd/keyctl list               # list keys (hash prefix, name, status)
 `keyctl`-created keys are plain admin keys with no owning user — they are
 separate from, and unaffected by, the per-user key management API below.
 
+## Seller ask publication (`askpublish`)
+
+The reference ask-publisher: it obtains a pricing-scoped node credential
+(pricing challenge → sign with the node's libp2p identity key → issue) and
+republishes the seller's asks on a cadence shorter than the server-assigned
+5-minute TTL, so a live seller's prices never go stale:
+
+```bash
+go run ./cmd/askpublish \
+  -api https://api.opentela.ai \
+  -control-token "$INTERNAL_CONTROL_TOKEN" \
+  -peer-key-file ~/.opentela/identity.key \
+  -asks asks.json            # {"asks":[{"service":"llm","model":"m1","input_per_million":100,...}]}
+```
+
+- `-once` publishes a single cycle and exits (for cron/systemd timers);
+  otherwise it republishes every `-interval` (default `2m`) until SIGINT.
+- Rows carry only service/model/rates — the server keys the replacement by
+  the credential subject, derived from the node's libp2p identity key (the
+  peer key is *not* the Solana wallet).
+- Publication requires the seller to be a **billable provider** (a linked
+  instance with a credit account and owner wallet) whose live mesh
+  observation matches the owner wallet — the same predicate the billing
+  gate uses for routing.
+- If the republisher is down for longer than the ask TTL, the peer drops out
+  of the priced market; with `BILLING_REQUIRE_PRICED_PEER=true` it is then
+  excluded from routing instead of serving for free.
+
 ## Using with Claude Code (Anthropic Messages API)
 
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) speaks the

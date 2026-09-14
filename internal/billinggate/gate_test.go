@@ -80,8 +80,14 @@ func makePeer(service, model string, connected bool) peers.Peer {
 }
 
 func newGate(t *testing.T, mode config.BillingMode, st *stubStore, snap *peers.Snapshot) *Service {
+	return newGateWithPolicy(t, mode, st, snap, false)
+}
+
+// newGateWithPolicy is newGate with the BILLING_REQUIRE_PRICED_PEER posture
+// set explicitly.
+func newGateWithPolicy(t *testing.T, mode config.BillingMode, st *stubStore, snap *peers.Snapshot, requirePricedPeer bool) *Service {
 	t.Helper()
-	s := New(st, nil, mode, 1024, 0)
+	s := New(st, nil, mode, 1024, 0, requirePricedPeer)
 	// Inject a snapshot function that returns the prebuilt snapshot.
 	s.getSnap = func(context.Context) (*peers.Snapshot, error) {
 		return snap, nil
@@ -111,7 +117,7 @@ func postGate(t *testing.T, s *Service, body, accountID string) *httptest.Respon
 // --- tests ---
 
 func TestGateOffModeIsPassThrough(t *testing.T) {
-	s := New(&stubStore{}, nil, config.BillingOff, 1024, 0)
+	s := New(&stubStore{}, nil, config.BillingOff, 1024, 0, false)
 	called := false
 	h := s.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		called = true
@@ -369,6 +375,62 @@ func TestGateUnpricedPeerIsAffordable(t *testing.T) {
 	}
 	if !strings.Contains(rec.Header().Get("X-Allowed-Peers"), "peer-free") {
 		t.Fatal("unpriced peer should be in allowed-peers")
+	}
+}
+
+func TestGateRequirePricedPeerExcludesUnpricedWhenMarketPriced(t *testing.T) {
+	// BILLING_REQUIRE_PRICED_PEER: peer-A publishes an ask, peer-B never
+	// publishes. Once the market has priced the route, an unpriced peer is
+	// excluded from the affordable set instead of serving for free.
+	snap := &peers.Snapshot{Entries: map[string]peers.Entry{
+		"peer-A": {Peer: makePeer("llm", "m1", true), Instance: &store.InstanceInfo{PeerID: "peer-A", AccountID: "s-A", OwnerWallet: "w-A"}},
+		"peer-B": {Peer: makePeer("llm", "m1", true), Instance: &store.InstanceInfo{PeerID: "peer-B", AccountID: "s-B", OwnerWallet: "w-B"}},
+	}}
+	st := &stubStore{
+		credit: billing.AccountCredit{AccountID: "buyer-1", CreditRaw: 1_000_000},
+		asks: []billing.Ask{
+			{PeerID: "peer-A", Service: "llm", Model: "m1", InputPerMillion: 1000, CachedInputPerMillion: 200, OutputPerMillion: 3000, Revision: 1},
+		},
+	}
+	s := newGateWithPolicy(t, config.BillingEnforce, st, snap, true)
+	rec := postGate(t, s, `{"model":"m1","max_tokens":64}`, "buyer-1")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if st.reserved == nil {
+		t.Fatal("expected reservation")
+	}
+	allowed := rec.Header().Get("X-Allowed-Peers")
+	if !strings.Contains(allowed, "peer-A") {
+		t.Fatalf("allowed-peers = %q, missing priced peer-A", allowed)
+	}
+	if strings.Contains(allowed, "peer-B") {
+		t.Fatalf("allowed-peers = %q, unpriced peer-B must be excluded", allowed)
+	}
+	if len(st.reserved.Quotes) != 1 || st.reserved.Quotes[0].PeerID != "peer-A" {
+		t.Fatalf("reserved quotes = %+v, want only peer-A", st.reserved.Quotes)
+	}
+}
+
+func TestGateRequirePricedPeerKeepsUnpricedWhenNoAsks(t *testing.T) {
+	// A cold market: no live asks at all. The policy must keep the original
+	// behavior (unpriced peers eligible at a zero quote) so the network still
+	// boots before anyone publishes.
+	snap := &peers.Snapshot{Entries: map[string]peers.Entry{
+		"peer-free": {Peer: makePeer("llm", "m1", true), Instance: &store.InstanceInfo{PeerID: "peer-free", AccountID: "s", OwnerWallet: "w"}},
+	}}
+	st := &stubStore{
+		credit: billing.AccountCredit{AccountID: "buyer-1", CreditRaw: 100, MaxInputPerMillion: int64Ptr(50)},
+		asks:   nil, // no published asks
+	}
+	s := newGateWithPolicy(t, config.BillingEnforce, st, snap, true)
+	rec := postGate(t, s, `{"model":"m1","max_tokens":1}`, "buyer-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cold market should keep unpriced peers eligible: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("X-Allowed-Peers"), "peer-free") {
+		t.Fatal("unpriced peer should be in allowed-peers on a cold market")
 	}
 }
 

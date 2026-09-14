@@ -301,6 +301,55 @@ answered before auth.
 Note: revocation is not instant — a revoked key may keep working until its 14-day
 cache entry expires or the server restarts.
 
+### Per-request price caps — "the maximum fee I'll pay for this request"
+
+Billing is a two-sided market: every seller publishes an **ask** (their price per
+1M tokens, three dimensions) and every buyer sets a **cap** (their maximum fee
+on the same dimensions). Account-level caps are managed on the wallet page
+(`PATCH /manage/billing/preferences`). A caller can additionally cap the price
+of a single request with three optional headers, parsed by the billing gate
+before the request is forwarded:
+
+| Header | Unit | Caps |
+|---|---|---|
+| `X-Max-Input-Price-Per-Million` | OTELA base units per 1M regular input tokens | regular (uncached) prompt tokens |
+| `X-Max-Cached-Input-Price-Per-Million` | OTELA base units per 1M cached input tokens | cache-read tokens |
+| `X-Max-Output-Price-Per-Million` | OTELA base units per 1M output tokens | generated tokens |
+
+Semantics (see `internal/billinggate/gate.go` `parseRequestCaps`):
+
+- A **missing header** leaves that dimension unlimited *for this request*.
+- **Zero is a valid cap**: only peers priced at zero on that axis are
+  affordable (a "free peers only" request).
+- A **negative or non-integer** value is a malformed request — the gate
+  rejects with `400 invalid_price_cap` before any GPU work.
+- Per-request caps can **tighten but never widen** the account caps: the
+  effective cap per dimension is the tighter of the two.
+- If no live peer's ask fits the effective caps, the gate rejects with
+  `402 price_above_max` and nothing is reserved or charged.
+
+Example — accept at most 1000 base units per 1M input tokens and 2000 per 1M
+output tokens for this one request, regardless of account defaults:
+
+```js
+await fetch("https://api.opentela.ai/v1/service/llm/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+    "X-Max-Input-Price-Per-Million": "1000",
+    "X-Max-Output-Price-Per-Million": "2000",
+  },
+  body: JSON.stringify({ model: "<model>", messages: [/* … */] }),
+});
+```
+
+The settlement bills at the served peer's published ask (frozen in the
+request's immutable quote snapshot), never at the cap — the cap only decides
+which peers are affordable. Live market prices per `(service, model)` are on
+the public catalogue (`GET /v1/services`, `market` array) and in the cloud
+console's services page.
+
 ## Step 8 (optional) — Show the GPU leaderboard
 
 `GET /v1/leaderboard` is public (no key, CORS-enabled like the rest of `/v1/*`)

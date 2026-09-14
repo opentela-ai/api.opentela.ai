@@ -148,7 +148,7 @@ func run() error {
 				treasuryATA = solana.EncodeBase58(ata)
 			}
 		}
-		billingRoutes := billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled)
+		billingRoutes := billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
 		log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
 		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
@@ -233,7 +233,7 @@ func run() error {
 	var billingGate http.Handler
 	var pricingHandler http.Handler
 	if cfg.BillingMode != config.BillingOff {
-		gateSvc := billinggate.New(pg, peerSnap, cfg.BillingMode, cfg.BillingOutputMax, cfg.BillingFeeBps)
+		gateSvc := billinggate.New(pg, peerSnap, cfg.BillingMode, cfg.BillingOutputMax, cfg.BillingFeeBps, cfg.BillingRequirePricedPeer)
 
 		// Settlement finalizes each reserved request against the exact usage
 		// parsed by the perf hook (no second body parse). The settler runs
