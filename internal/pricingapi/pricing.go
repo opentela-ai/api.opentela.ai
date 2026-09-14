@@ -118,7 +118,8 @@ func (s *Service) Handler() http.Handler {
 		}
 
 		// Validate the asks against the seller's own current advertisement.
-		if err := s.validateAgainstObservation(req.Asks, obs.Services); err != nil {			httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if err := s.validateAgainstObservation(req.Asks, obs.Services); err != nil {
+			httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 

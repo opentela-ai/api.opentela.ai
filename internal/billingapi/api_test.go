@@ -54,11 +54,11 @@ type stubStore struct {
 	listWNext     *billing.WithdrawalCursor
 	listWErr      error
 	// Seller asks surface.
-	instances     []store.InstanceInfo
-	instancesErr  error
-	asksIn        []string
-	asksOut       []billing.Ask
-	asksErr       error
+	instances    []store.InstanceInfo
+	instancesErr error
+	asksIn       []string
+	asksOut      []billing.Ask
+	asksErr      error
 }
 
 func (s *stubStore) ListInstancesByUser(_ context.Context, accountID string) ([]store.InstanceInfo, error) {

@@ -30,14 +30,14 @@ type fakeAPI struct {
 	kid          string
 	signingKey   ed25519.PrivateKey
 
-	mu          sync.Mutex
-	challenges  map[string]string // challenge id -> message
-	published   []billing.Ask
-	challengeN  int
-	issueN      int
-	publishN    int
-	badSignN    int // issue attempts whose signature failed
-	badTokenN   int // publish attempts whose JWT failed
+	mu         sync.Mutex
+	challenges map[string]string // challenge id -> message
+	published  []billing.Ask
+	challengeN int
+	issueN     int
+	publishN   int
+	badSignN   int // issue attempts whose signature failed
+	badTokenN  int // publish attempts whose JWT failed
 }
 
 func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
