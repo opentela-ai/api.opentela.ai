@@ -104,10 +104,20 @@ func TestAskConfigLifecycle(t *testing.T) {
 	// Republishing into the market table works from the same shapes the
 	// refresher uses: ReplaceAsks must accept the config rows untouched
 	// (Ask embeds PeerID; config rows carry it empty, which is how the
-	// refresher passes them).
-	live, err := p.ReplaceAsks(ctx, "peer-cfg-1", cfg["peer-cfg-1"], 5*time.Minute)
-	if err != nil || live != 2 {
-		t.Fatalf("ReplaceAsks from config: live=%d err=%v", live, err)
+	// refresher passes them). It returns the new revision; liveness is
+	// verified by reading the market table back.
+	rev, err := p.ReplaceAsks(ctx, "peer-cfg-1", cfg["peer-cfg-1"], 5*time.Minute)
+	if err != nil || rev == 0 {
+		t.Fatalf("ReplaceAsks from config: rev=%d err=%v", rev, err)
+	}
+	for _, m := range []string{"m1", "m2"} {
+		live, err := p.LiveAsks(ctx, "llm", m, time.Now())
+		if err != nil {
+			t.Fatalf("live %s: %v", m, err)
+		}
+		if len(live) != 1 || live[0].PeerID != "peer-cfg-1" {
+			t.Fatalf("live %s = %+v", m, live)
+		}
 	}
 
 	// Clearing one peer leaves others untouched.
