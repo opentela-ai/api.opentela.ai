@@ -130,8 +130,8 @@ type Config struct {
 	// program default to the faucet's, since devnet deposits use the same
 	// network. The watcher runs only when BILLING_MODE != off AND
 	// BillingTreasuryWallet is set.
-	BillingTreasuryWallet      string
-	BillingSolanaRPC           string
+	BillingTreasuryWallet string
+	BillingSolanaRPC      string
 
 	// Solana RPC proxy (browser plane): when SolRPCProxyUpstream is set the
 	// server serves POST /solana-rpc, forwarding browser JSON-RPC to the
@@ -141,10 +141,10 @@ type Config struct {
 	// Defaults to the billing/faucet RPC when unset; empty disables the
 	// route entirely. SolRPCProxyMethods overrides the allowlist
 	// (comma-separated); SolRPCProxyRateRPS/Burst tune the per-IP bucket.
-	SolRPCProxyUpstream string
-	SolRPCProxyMethods  []string
-	SolRPCProxyRateRPS  float64
-	SolRPCProxyBurst    int
+	SolRPCProxyUpstream        string
+	SolRPCProxyMethods         []string
+	SolRPCProxyRateRPS         float64
+	SolRPCProxyBurst           int
 	BillingDepositMint         string
 	BillingDepositTokenProgram string
 	BillingDepositDecimals     int
