@@ -29,7 +29,7 @@ func TestTinybirdSinkPostsBatchedSamples(t *testing.T) {
 	sink := NewTinybirdSink(host, "test-token", time.Hour, 1024, 16)
 	ts := time.Date(2026, 8, 4, 22, 15, 0, 0, time.UTC)
 	samples := []Sample{
-		{TS: ts, Service: "llm", Route: "chat/completions", Model: "gpt-4o", PeerFP: "aaaa0000aaaa0001", GPUModel: "NVIDIA GeForce RTX 4090", GPUCount: 1, Status: 200, TTFTMs: 220, FirstTokenMs: 225, TotalMs: 1475, InputTokens: 50, OutputTokens: 100, ResponseBytes: 900, GPUMs: 1400},
+		{TS: ts, Service: "llm", Route: "chat/completions", Model: "gpt-4o", PeerFP: "aaaa0000aaaa0001", GPUModel: "NVIDIA GeForce RTX 4090", GPUCount: 1, Status: 200, TTFTMs: 220, FirstTokenMs: 225, TotalMs: 1475, InputTokens: 50, CachedInputTokens: 12, OutputTokens: 100, ResponseBytes: 900, GPUMs: 1400},
 		{TS: ts, Service: "llm", Route: "chat/completions", Model: "gpt-4o", PeerFP: "cccc0000cccc0003", GPUModel: "Tesla T4", GPUCount: 1, Status: 500, TTFTMs: 900, FirstTokenMs: 905, TotalMs: 5005, InputTokens: 50, OutputTokens: 100, ResponseBytes: 900, GPUMs: 4800},
 	}
 	if err := sink.post(context.Background(), encodeSamples(samples)); err != nil {
@@ -53,6 +53,9 @@ func TestTinybirdSinkPostsBatchedSamples(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"peer_fp":"aaaa0000aaaa0001"`) || !strings.Contains(gotBody, `"ttft_ms":900`) {
 		t.Fatalf("body missing expected fields:\n%s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"cached_input_tokens":12`) {
+		t.Fatalf("body missing cached_input_tokens:\n%s", gotBody)
 	}
 	if !strings.Contains(gotBody, `"ts":"2026-08-04 22:15:00.000"`) {
 		t.Fatalf("ts format mismatch:\n%s", gotBody)

@@ -132,10 +132,11 @@ type sampleRow struct {
 	TTFTMs        float64 `json:"ttft_ms"`
 	FirstTokenMs  float64 `json:"first_token_ms"`
 	TotalMs       float64 `json:"total_ms"`
-	InputTokens   int     `json:"input_tokens"`
-	OutputTokens  int     `json:"output_tokens"`
-	ResponseBytes int64   `json:"response_bytes"`
-	GPUMs         int64   `json:"gpu_ms"`
+	InputTokens        int     `json:"input_tokens"`
+	CachedInputTokens  int     `json:"cached_input_tokens"`
+	OutputTokens       int     `json:"output_tokens"`
+	ResponseBytes      int64   `json:"response_bytes"`
+	GPUMs              int64   `json:"gpu_ms"`
 }
 
 func encodeSamples(samples []Sample) []byte {
@@ -158,10 +159,11 @@ func encodeSamples(samples []Sample) []byte {
 			TTFTMs:        sm.TTFTMs,
 			FirstTokenMs:  sm.FirstTokenMs,
 			TotalMs:       sm.TotalMs,
-			InputTokens:   sm.InputTokens,
-			OutputTokens:  sm.OutputTokens,
-			ResponseBytes: sm.ResponseBytes,
-			GPUMs:         sm.GPUMs,
+			InputTokens:       sm.InputTokens,
+			CachedInputTokens: sm.CachedInputTokens,
+			OutputTokens:      sm.OutputTokens,
+			ResponseBytes:     sm.ResponseBytes,
+			GPUMs:             sm.GPUMs,
 		}
 		if err := enc.Encode(row); err != nil {
 			log.Printf("perf: encoding sample: %v", err)

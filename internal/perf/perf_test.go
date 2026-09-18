@@ -467,7 +467,7 @@ func TestSinkBatchesAndFlushes(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); sink.Run(ctx) }()
 
-	sink.Observe(Sample{TS: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Service: "chat", Model: "m", PeerFP: "0123456789abcdef", GPUModel: "Tesla T4", OutputTokens: 5})
+	sink.Observe(Sample{TS: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), Service: "chat", Model: "m", PeerFP: "0123456789abcdef", GPUModel: "Tesla T4", InputTokens: 100, CachedInputTokens: 30, OutputTokens: 5})
 	deadline := time.Now().Add(2 * time.Second)
 	for firstBody() == "" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -476,7 +476,7 @@ func TestSinkBatchesAndFlushes(t *testing.T) {
 	if body == "" {
 		t.Fatal("no insert happened")
 	}
-	for _, want := range []string{`"ts":"2025-01-01 00:00:00.000"`, `"model":"m"`, `"gpu_model":"Tesla T4"`, `"output_tokens":5`} {
+	for _, want := range []string{`"ts":"2025-01-01 00:00:00.000"`, `"model":"m"`, `"gpu_model":"Tesla T4"`, `"input_tokens":100`, `"cached_input_tokens":30`, `"output_tokens":5`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("insert body missing %s: %s", want, body)
 		}

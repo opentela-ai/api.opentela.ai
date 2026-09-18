@@ -19,6 +19,7 @@ SCHEMA >
     first_token_ms Float32 `json:$.first_token_ms`,
     total_ms Float32 `json:$.total_ms`,
     input_tokens UInt32 `json:$.input_tokens`,
+    cached_input_tokens UInt32 `json:$.cached_input_tokens`,
     output_tokens UInt32 `json:$.output_tokens`,
     response_bytes UInt64 `json:$.response_bytes`,
     gpu_ms UInt64 `json:$.gpu_ms`

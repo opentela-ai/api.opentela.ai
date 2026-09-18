@@ -1,0 +1,43 @@
+TOKEN token_usage_read READ
+
+DESCRIPTION >
+    Daily token usage per model over a lookback window: request counts plus
+    input, cached-input, and output token sums aggregated from perf_samples.
+    success_only defaults to 1: only rows matching the billing settlement
+    predicate count (2xx status, not client-aborted, complete token usage).
+    Pass success_only=0 for raw totals including aborted/failed responses.
+    Per-time-window, not per-request, and anonymous by construction (no
+    account or API-key attribution; see the perf_samples datasource
+    description).
+
+NODE daily_token_usage
+SQL >
+    %
+    SELECT
+        toDate(ts) AS day,
+        model,
+        count() AS requests,
+        sum(input_tokens) AS input_tokens,
+        sum(cached_input_tokens) AS cached_input_tokens,
+        sum(output_tokens) AS output_tokens
+    FROM perf_samples
+    WHERE ts >= now() - INTERVAL {{Int32(days, 30)}} DAY
+    -- success_only=1 (default) keeps only complete-usage responses, the same
+    -- predicate settlement uses to mark a request 'settled': 2xx, not
+    -- client-aborted, with final token counts present.
+        AND ({{Int32(success_only, 1)}} = 0 OR
+             (perf_samples.status >= 200 AND perf_samples.status < 300
+              AND NOT perf_samples.client_abort
+              AND (perf_samples.input_tokens > 0
+                   OR perf_samples.cached_input_tokens > 0
+                   OR perf_samples.output_tokens > 0)))
+        {% if defined(service) %}
+        AND service = {{String(service)}}
+        {% end %}
+        {% if defined(model) %}
+        AND model = {{String(model)}}
+        {% end %}
+    GROUP BY day, model
+    ORDER BY day DESC, model
+
+TYPE endpoint

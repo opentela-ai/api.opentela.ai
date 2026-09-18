@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS perf_samples
     first_token_ms Float32 DEFAULT 0,
     total_ms       Float32 DEFAULT 0,
     input_tokens   UInt32 DEFAULT 0,
+    cached_input_tokens UInt32 DEFAULT 0,
     output_tokens  UInt32 DEFAULT 0,
     response_bytes UInt64 DEFAULT 0,
     gpu_ms         UInt64 DEFAULT 0
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS perf_hourly
     errors        SimpleAggregateFunction(sum, UInt64),
     client_aborts SimpleAggregateFunction(sum, UInt64),
     input_tokens  SimpleAggregateFunction(sum, UInt64),
+    cached_input_tokens SimpleAggregateFunction(sum, UInt64),
     output_tokens SimpleAggregateFunction(sum, UInt64),
     gen_ms        SimpleAggregateFunction(sum, Float64),
     ttft_q        AggregateFunction(quantilesTDigest(0.5, 0.9, 0.99), Float32),
@@ -78,6 +80,7 @@ SELECT
     countIf(status >= 500) AS errors,
     countIf(client_abort) AS client_aborts,
     sum(input_tokens) AS input_tokens,
+    sum(cached_input_tokens) AS cached_input_tokens,
     sum(output_tokens) AS output_tokens,
     sum(if(first_token_ms > 0, greatest(total_ms - first_token_ms, 0), total_ms)) AS gen_ms,
     quantilesTDigestState(0.5, 0.9, 0.99)(ttft_ms) AS ttft_q,
@@ -95,3 +98,25 @@ GROUP BY
     service,
     model,
     gpu_model;
+
+-- Daily token usage per model (GPUs and services collapsed): the reporting
+-- window for usage dashboards, mirroring the Tinybird token_usage_daily
+-- endpoint. Reads perf_hourly so retention follows the 13-month rollup
+-- rather than the 30-day raw table; SimpleAggregateFunction(sum) columns
+-- aggregate with plain sum().
+-- NOTE: unlike the Tinybird pipe there is no success_only filter here — the
+-- hourly rollup keeps only status *counts* (errors/client_aborts), not
+-- per-row status, so row-level filtering must be done on perf_samples
+-- directly (30-day window) using the settlement predicate:
+--   status >= 200 AND status < 300 AND NOT client_abort
+--   AND (input_tokens > 0 OR cached_input_tokens > 0 OR output_tokens > 0)
+CREATE VIEW IF NOT EXISTS token_usage_daily AS
+SELECT
+    toDate(hour) AS day,
+    model,
+    sum(requests) AS requests,
+    sum(input_tokens) AS input_tokens,
+    sum(cached_input_tokens) AS cached_input_tokens,
+    sum(output_tokens) AS output_tokens
+FROM perf_hourly
+GROUP BY day, model;
