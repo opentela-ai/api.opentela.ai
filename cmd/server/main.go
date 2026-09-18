@@ -106,7 +106,7 @@ func run() error {
 	meshClient := mesh.New(cfg.UpstreamURL)
 	if cfg.KeyMgmtEnabled {
 		verifier := neonauth.New(cfg.NeonAuthJWKSURL, cfg.NeonAuthIssuer, cfg.NeonAuthAudience, cfg.JWKSCacheTTL)
-		svc := keysvc.New(pg, cfg.MaxKeysPerUser)
+		svc := keysvc.New(pg, cfg.MaxKeysPerUser, c)
 		var faucetRoutes manageapi.FaucetRoutes
 		if cfg.FaucetEnabled {
 			faucetSvc, err := faucet.New(cfg.FaucetRPCURL, cfg.FaucetMint, cfg.FaucetTokenProgram, cfg.FaucetWalletKey, cfg.FaucetAmountRaw)

@@ -75,6 +75,15 @@ func (c *Cache[T]) Set(key string, val T, ttl time.Duration) {
 	c.mu.Unlock()
 }
 
+// Delete removes key from the cache; a missing key is a no-op. Callers use it
+// to drop stale verdicts out-of-band — e.g. purging a revoked API key's cached
+// positive verdict so the key stops authenticating before TTL expiry.
+func (c *Cache[T]) Delete(key string) {
+	c.mu.Lock()
+	delete(c.data, key)
+	c.mu.Unlock()
+}
+
 // Len returns the number of entries currently held (including any not yet swept).
 func (c *Cache[T]) Len() int {
 	c.mu.RLock()

@@ -213,7 +213,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("DATABASE_URL is required")
 	}
 
-	cacheTTL, err := durationEnv("CACHE_TTL", 336*time.Hour)
+	cacheTTL, err := durationEnv("CACHE_TTL", 5*time.Minute)
 	if err != nil {
 		return nil, err
 	}

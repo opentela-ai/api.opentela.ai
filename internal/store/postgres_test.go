@@ -127,12 +127,13 @@ func TestPostgresUserKeyLifecycle(t *testing.T) {
 	}
 
 	// Bob cannot revoke Alice's key.
-	if changed, err := p.RevokeByIDForUser(ctx, bob, info.ID); err != nil || changed {
-		t.Fatalf("RevokeByIDForUser(bob, alice's id) = (%v,%v), want (false,nil)", changed, err)
+	if hash, changed, err := p.RevokeByIDForUser(ctx, bob, info.ID); err != nil || changed || hash != "" {
+		t.Fatalf("RevokeByIDForUser(bob, alice's id) = (%q,%v,%v), want (\"\",false,nil)", hash, changed, err)
 	}
-	// Alice can.
-	if changed, err := p.RevokeByIDForUser(ctx, alice, info.ID); err != nil || !changed {
-		t.Fatalf("RevokeByIDForUser(alice) = (%v,%v), want (true,nil)", changed, err)
+	// Alice can; the revoked key's hash is returned for cache invalidation.
+	revokedHash, changed, rerr := p.RevokeByIDForUser(ctx, alice, info.ID)
+	if rerr != nil || !changed || revokedHash != HashKey("tok-a") {
+		t.Fatalf("RevokeByIDForUser(alice) = (%q,%v,%v), want (%q,true,nil)", revokedHash, changed, rerr, HashKey("tok-a"))
 	}
 	// Revoked keys drop out of the active count.
 	if n, err := p.CountActiveByUser(ctx, alice); err != nil || n != 0 {

@@ -13,7 +13,7 @@ configured upstream.
 | `OPENTELA_UPSTREAM_URL`  | yes      | —       | Base URL requests are forwarded to   |
 | `DATABASE_URL`           | yes      | —       | Postgres DSN                         |
 | `LISTEN_ADDR`            | no       | `:8080` | Listen address                       |
-| `CACHE_TTL`              | no       | `336h`  | TTL for validated keys (14 days)     |
+| `CACHE_TTL`              | no       | `5m`    | TTL for cached key-validation verdicts; bounds propagation of out-of-band revocations (keyctl) and cross-replica revokes — console revokes purge the cache immediately |
 | `CACHE_NEGATIVE_TTL`     | no       | `30s`   | TTL for invalid results              |
 | `CACHE_JANITOR_INTERVAL` | no       | `1m`    | Expired-entry sweep interval         |
 | `INTERNAL_CONTROL_TOKEN` | no*      | —       | Bearer secret for internal ACL and node-credential endpoints (minimum 32 bytes) |

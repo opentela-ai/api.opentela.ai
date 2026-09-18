@@ -33,8 +33,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("ListenAddr = %q, want :8080", cfg.ListenAddr)
 	}
-	if cfg.CacheTTL != 336*time.Hour {
-		t.Errorf("CacheTTL = %v, want 336h", cfg.CacheTTL)
+	if cfg.CacheTTL != 5*time.Minute {
+		t.Errorf("CacheTTL = %v, want 5m", cfg.CacheTTL)
 	}
 	if cfg.CacheNegTTL != 30*time.Second {
 		t.Errorf("CacheNegTTL = %v, want 30s", cfg.CacheNegTTL)

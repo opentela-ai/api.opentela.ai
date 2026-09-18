@@ -16,6 +16,20 @@ func TestSetGetHit(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesEntry(t *testing.T) {
+	c := New[bool](0)
+	defer c.Close()
+	c.Set("k", true, time.Minute)
+	c.Delete("k")
+	if _, ok := c.Get("k"); ok {
+		t.Fatal("Get after Delete ok = true, want false")
+	}
+	if c.Len() != 0 {
+		t.Fatalf("Len after Delete = %d, want 0", c.Len())
+	}
+	c.Delete("absent") // must not panic
+}
+
 func TestGetMiss(t *testing.T) {
 	c := New[bool](0)
 	defer c.Close()

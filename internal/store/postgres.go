@@ -152,16 +152,22 @@ func (p *Postgres) ListByUser(ctx context.Context, userID string) ([]KeyInfo, er
 	return out, nil
 }
 
-// RevokeByIDForUser marks one of userID's keys inactive. It reports whether a row
-// changed; a mismatched owner or unknown id changes nothing (reported as false).
-func (p *Postgres) RevokeByIDForUser(ctx context.Context, userID string, id int64) (bool, error) {
-	tag, err := p.pool.Exec(ctx,
+// RevokeByIDForUser marks one of userID's keys inactive and returns the revoked
+// key's hash so callers can purge any cached validation verdict for it. It
+// reports whether a row changed; a mismatched owner or unknown id changes
+// nothing (reported as ("", false, nil)).
+func (p *Postgres) RevokeByIDForUser(ctx context.Context, userID string, id int64) (keyHash string, changed bool, err error) {
+	err = p.pool.QueryRow(ctx,
 		`UPDATE api_keys SET active = FALSE, revoked_at = now()
-		 WHERE id = $1 AND user_id = $2 AND active = TRUE`, id, userID)
-	if err != nil {
-		return false, fmt.Errorf("store: revoke by id: %w", err)
+		 WHERE id = $1 AND user_id = $2 AND active = TRUE
+		 RETURNING key_hash`, id, userID).Scan(&keyHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
 	}
-	return tag.RowsAffected() > 0, nil
+	if err != nil {
+		return "", false, fmt.Errorf("store: revoke by id: %w", err)
+	}
+	return keyHash, true, nil
 }
 
 // CountActiveByUser returns how many active keys userID currently holds.

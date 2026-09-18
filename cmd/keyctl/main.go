@@ -112,6 +112,7 @@ func cmdRevoke(ctx context.Context, pg *store.Postgres, args []string) error {
 		return nil
 	}
 	fmt.Println("key revoked")
+	fmt.Println("note: the API server may still serve cached validations of this key for up to CACHE_TTL (default 5m); console-initiated revokes take effect immediately")
 	return nil
 }
 
