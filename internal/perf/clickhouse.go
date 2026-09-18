@@ -120,23 +120,23 @@ func (s *ClickHouseSink) drain(n int) []Sample {
 
 // sampleRow mirrors the perf_samples columns for JSONEachRow inserts.
 type sampleRow struct {
-	TS            string  `json:"ts"`
-	Service       string  `json:"service"`
-	Route         string  `json:"route"`
-	Model         string  `json:"model"`
-	PeerFP        string  `json:"peer_fp"`
-	GPUModel      string  `json:"gpu_model"`
-	GPUCount      int     `json:"gpu_count"`
-	Status        int     `json:"status"`
-	ClientAbort   bool    `json:"client_abort"`
-	TTFTMs        float64 `json:"ttft_ms"`
-	FirstTokenMs  float64 `json:"first_token_ms"`
-	TotalMs       float64 `json:"total_ms"`
-	InputTokens        int     `json:"input_tokens"`
-	CachedInputTokens  int     `json:"cached_input_tokens"`
-	OutputTokens       int     `json:"output_tokens"`
-	ResponseBytes      int64   `json:"response_bytes"`
-	GPUMs              int64   `json:"gpu_ms"`
+	TS                string  `json:"ts"`
+	Service           string  `json:"service"`
+	Route             string  `json:"route"`
+	Model             string  `json:"model"`
+	PeerFP            string  `json:"peer_fp"`
+	GPUModel          string  `json:"gpu_model"`
+	GPUCount          int     `json:"gpu_count"`
+	Status            int     `json:"status"`
+	ClientAbort       bool    `json:"client_abort"`
+	TTFTMs            float64 `json:"ttft_ms"`
+	FirstTokenMs      float64 `json:"first_token_ms"`
+	TotalMs           float64 `json:"total_ms"`
+	InputTokens       int     `json:"input_tokens"`
+	CachedInputTokens int     `json:"cached_input_tokens"`
+	OutputTokens      int     `json:"output_tokens"`
+	ResponseBytes     int64   `json:"response_bytes"`
+	GPUMs             int64   `json:"gpu_ms"`
 }
 
 func encodeSamples(samples []Sample) []byte {
@@ -147,18 +147,18 @@ func encodeSamples(samples []Sample) []byte {
 	enc := json.NewEncoder(&buf)
 	for _, sm := range samples {
 		row := sampleRow{
-			TS:            sm.TS.UTC().Format("2006-01-02 15:04:05.000"),
-			Service:       sm.Service,
-			Route:         sm.Route,
-			Model:         sm.Model,
-			PeerFP:        sm.PeerFP,
-			GPUModel:      sm.GPUModel,
-			GPUCount:      sm.GPUCount,
-			Status:        sm.Status,
-			ClientAbort:   sm.ClientAbort,
-			TTFTMs:        sm.TTFTMs,
-			FirstTokenMs:  sm.FirstTokenMs,
-			TotalMs:       sm.TotalMs,
+			TS:                sm.TS.UTC().Format("2006-01-02 15:04:05.000"),
+			Service:           sm.Service,
+			Route:             sm.Route,
+			Model:             sm.Model,
+			PeerFP:            sm.PeerFP,
+			GPUModel:          sm.GPUModel,
+			GPUCount:          sm.GPUCount,
+			Status:            sm.Status,
+			ClientAbort:       sm.ClientAbort,
+			TTFTMs:            sm.TTFTMs,
+			FirstTokenMs:      sm.FirstTokenMs,
+			TotalMs:           sm.TotalMs,
 			InputTokens:       sm.InputTokens,
 			CachedInputTokens: sm.CachedInputTokens,
 			OutputTokens:      sm.OutputTokens,
