@@ -20,7 +20,8 @@ import (
 //     hardware) stays behind the API key like everything else.
 //     Every other /v1 path, including anything under /v1/service/{service}/
 //     that spends GPU time, stays behind the API-key middleware.
-//   - GET /v1/leaderboard is the anonymized GPU performance leaderboard
+//   - GET /v1/leaderboard and GET /v1/token-usage are the anonymized GPU
+//     performance leaderboard and daily token-usage totals
 //     (internal/leaderboard), when non-nil; permissionless for the same
 //     abuse-screened reason as the catalogue.
 //   - GET /v1/service/{service}/v1/models is the OpenAI-shaped model list for
@@ -48,15 +49,16 @@ func NewWithInternalOpts(v auth.TokenValidator, proxy http.Handler, keyMgmt http
 }
 
 func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options) http.Handler {
-	return NewWithBilling(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, corsOrigins, billing, nil, nil, nil, nil, nil)
+	return NewWithBilling(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, nil, corsOrigins, billing, nil, nil, nil, nil, nil)
 }
 
 // NewWithBilling is NewWithControlPlanes plus the billing gate (which wraps
 // the inference proxy when non-nil) and the seller-pricing route (POST
 // /internal/pricing, when non-nil). billingGate must already wrap the proxy
 // with the API-key middleware (the gate reads the owning account from
-// context), so callers pass the gate in place of the raw proxy.
-func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler, solRPC http.Handler) http.Handler {
+// context), so callers pass the gate in place of the raw proxy. usage, when
+// non-nil, serves the permissionless GET /v1/token-usage aggregate.
+func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, usage http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler, solRPC http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -98,6 +100,11 @@ func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Hand
 	// anonymized performance only (no peer identity, no keys).
 	if leaderboard != nil {
 		mux.Handle("GET /v1/leaderboard", cors(leaderboard))
+	}
+	// Permissionless like /v1/leaderboard: the usage endpoint serves
+	// aggregated, anonymized daily token totals (no account attribution).
+	if usage != nil {
+		mux.Handle("GET /v1/token-usage", cors(usage))
 	}
 	if catalog != nil {
 		mux.Handle("GET /v1/services", cors(catalog))

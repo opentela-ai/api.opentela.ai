@@ -90,6 +90,7 @@ type Config struct {
 	TinybirdHost        *url.URL
 	TinybirdAppendToken string
 	TinybirdLeaderboard string
+	TinybirdUsageToken  string
 	ClickHouseURL       *url.URL
 	ClickHouseDatabase  string
 	ClickHouseUsername  string
@@ -398,6 +399,10 @@ func Load() (*Config, error) {
 	if (tinybirdAppend == "") != (tinybirdRead == "") {
 		return nil, fmt.Errorf("TINYBIRD_APPEND_TOKEN and TINYBIRD_LEADERBOARD_TOKEN must be set together")
 	}
+	tinybirdUsage := os.Getenv("TINYBIRD_USAGE_TOKEN")
+	if tinybirdUsage != "" && tinybirdAppend == "" {
+		return nil, fmt.Errorf("TINYBIRD_USAGE_TOKEN requires TINYBIRD_APPEND_TOKEN and TINYBIRD_LEADERBOARD_TOKEN")
+	}
 	if tinybirdAppend != "" && clickHouseURL != nil {
 		return nil, fmt.Errorf("CLICKHOUSE_URL and TINYBIRD_APPEND_TOKEN are mutually exclusive — pick one perf backend")
 	}
@@ -638,6 +643,7 @@ func Load() (*Config, error) {
 		TinybirdHost:                   tinybirdHost,
 		TinybirdAppendToken:            tinybirdAppend,
 		TinybirdLeaderboard:            tinybirdRead,
+		TinybirdUsageToken:             tinybirdUsage,
 		ClickHouseURL:                  clickHouseURL,
 		ClickHouseDatabase:             clickHouseDatabase,
 		ClickHouseUsername:             clickHouseUsername,

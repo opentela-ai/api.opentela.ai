@@ -33,6 +33,7 @@ configured upstream.
 |--------------------------|----------|---------|--------------------------------------|
 | `TINYBIRD_APPEND_TOKEN`  | no       | —       | Tinybird `perf_append` token (APPEND scope); enables the managed Tinybird backend |
 | `TINYBIRD_LEADERBOARD_TOKEN` | no   | —       | Tinybird `leaderboard_read` token (READ scope on the `gpu_leaderboard` pipe); required with the append token |
+| `TINYBIRD_USAGE_TOKEN`   | no       | —       | Tinybird `token_usage_read` token (READ scope on the `token_usage_daily` pipe); enables `GET /v1/token-usage` on the Tinybird backend |
 | `TINYBIRD_HOST`          | no       | `https://api.tinybird.co` | Tinybird API host (switch regions/workspace here) |
 | `CLICKHOUSE_URL`         | no       | —       | ClickHouse HTTP endpoint; enables per-request performance sampling and `GET /v1/leaderboard` (mutually exclusive with the Tinybird tokens) |
 | `CLICKHOUSE_DATABASE`    | no       | `opentela` | Database holding the perf tables |
@@ -47,6 +48,8 @@ configured upstream.
 `INTERNAL_CONTROL_TOKEN` is required when `NODE_CREDENTIAL_SIGNING_KEY` is set.
 `CLICKHOUSE_USERNAME`/`CLICKHOUSE_PASSWORD` require `CLICKHOUSE_URL`.
 `TINYBIRD_APPEND_TOKEN` and `TINYBIRD_LEADERBOARD_TOKEN` must be set together.
+`TINYBIRD_USAGE_TOKEN` requires both of them (the ClickHouse backend needs no
+extra credential for usage).
 
 ## Observability (Better Stack logs, optional)
 
@@ -246,11 +249,18 @@ non-streaming replies) — and resolves the peer to its GPU model via the node
 table it already fetches for the catalog.
 
 Samples are batched into `perf_samples` (30-day TTL) and aggregated into the
-public leaderboard:
+public leaderboard and the daily token-usage report:
 
 ```bash
 curl "https://api.opentela.ai/v1/leaderboard?hours=168&service=llm"
+curl "https://api.opentela.ai/v1/token-usage?days=30"
 ```
+
+`/v1/token-usage` answers from the `token_usage_daily` pipe (ClickHouse:
+`perf_samples` directly, with the same settlement predicate applied at row
+level). `days` defaults to 30 (the sample TTL) and is capped at 30;
+`success_only` defaults to `1` so totals match what billing settles — pass
+`success_only=0` for raw totals including aborted/failed responses:
 
 ```json
 {
@@ -276,6 +286,32 @@ curl "https://api.opentela.ai/v1/leaderboard?hours=168&service=llm"
 `hours` defaults to 168 (max 720); `service` and `model` filter the rows. The
 endpoint needs no API key, like `/v1/services`.
 
+The usage report mirrors the leaderboard's shape (response truncated):
+
+```json
+{
+  "generated_at": "2026-09-18T12:00:00Z",
+  "window_days": 30,
+  "success_only": true,
+  "entries": [
+    {
+      "day": "2026-09-18",
+      "model": "glm-5.3-flash",
+      "requests": 91,
+      "input_tokens": 9143051,
+      "cached_input_tokens": 0,
+      "output_tokens": 81945
+    }
+  ]
+}
+```
+
+`days` defaults to 30 (max 30 — the sample TTL); `service` and `model` filter
+the rows. With `success_only=1` (default) the `requests` column counts only
+responses whose usage billing would settle, so it lines up with the credit
+ledger; zero-token 2xx responses are excluded (billing releases those as
+`zero_price`). The endpoint needs no API key.
+
 **Privacy**: ingestion persists only counters, timings, GPU model, and the
 served model name — never API keys, prompts, response payloads, or user
 identity. The serving peer is stored only as a truncated SHA-256 fingerprint
@@ -292,6 +328,7 @@ export TINYBIRD_HOST=https://api.tinybird.co
 tb token ls   # copy the perf_append and leaderboard_read tokens into:
 export TINYBIRD_APPEND_TOKEN=…
 export TINYBIRD_LEADERBOARD_TOKEN=…
+export TINYBIRD_USAGE_TOKEN=…
 ```
 
 The pipe answers the leaderboard straight off raw samples — no rollup table,
@@ -309,7 +346,8 @@ scheduler is needed.
 
 Backends are mutually exclusive (`CLICKHOUSE_URL` and `TINYBIRD_APPEND_TOKEN`
 together are rejected at startup). With neither set the pipeline is fully
-inert: no hooks are installed and `/v1/leaderboard` is not mounted.
+inert: no hooks are installed and `/v1/leaderboard` and `/v1/token-usage` are
+not mounted.
 
 ## Management and ACL API (optional)
 
