@@ -1,6 +1,8 @@
 // Package leaderboard serves the public GPU performance leaderboard: an
 // anonymized, aggregated view of how fast each GPU model serves each model
-// across the mesh, computed from the perf samples recorded in ClickHouse.
+// across the mesh, computed from the perf samples recorded in ClickHouse —
+// plus, when a usage querier is configured, the daily token-usage section of
+// the same response.
 //
 // The endpoint is permissionless (like the service catalogue), so it applies
 // the same abuse posture: short in-process caching, hard caps on the query
@@ -10,6 +12,7 @@ package leaderboard
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"sync"
@@ -45,9 +48,12 @@ type Querier interface {
 	Leaderboard(ctx context.Context, hours int, service, model string) ([]Row, error)
 }
 
-// Handler serves GET /v1/leaderboard with in-process TTL caching.
+// Handler serves GET /v1/leaderboard with in-process TTL caching. With a
+// non-nil usage querier the response also carries the daily token-usage
+// section (window derived from the requested hours).
 type Handler struct {
 	q   Querier
+	u   UsageQuerier
 	ttl time.Duration
 
 	mu      sync.Mutex
@@ -57,9 +63,10 @@ type Handler struct {
 }
 
 type cacheKey struct {
-	hours   int
-	service string
-	model   string
+	hours       int
+	successOnly bool
+	service     string
+	model       string
 }
 
 type cacheEntry struct {
@@ -68,9 +75,12 @@ type cacheEntry struct {
 }
 
 type response struct {
-	GeneratedAt string  `json:"generated_at"`
-	WindowHours int     `json:"window_hours"`
-	Entries     []entry `json:"entries"`
+	GeneratedAt string       `json:"generated_at"`
+	WindowHours int          `json:"window_hours"`
+	WindowDays  int          `json:"window_days,omitempty"`
+	SuccessOnly *bool        `json:"success_only,omitempty"`
+	Entries     []entry      `json:"entries"`
+	Usage       []usageEntry `json:"usage,omitempty"`
 }
 
 type entry struct {
@@ -91,8 +101,20 @@ func New(q Querier, ttl time.Duration) *Handler {
 	return &Handler{q: q, ttl: ttl, entries: make(map[cacheKey]cacheEntry), now: time.Now}
 }
 
+// NewWithUsage is New plus a usage querier folded into the same response.
+func NewWithUsage(q Querier, u UsageQuerier, ttl time.Duration) *Handler {
+	h := New(q, ttl)
+	h.u = u
+	return h
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hours, err := parseHours(r.URL.Query().Get("hours"))
+	if err != nil {
+		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	successOnly, err := parseSuccessOnly(r.URL.Query().Get("success_only"))
 	if err != nil {
 		httputil.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -103,7 +125,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := cacheKey{hours: hours, service: service, model: model}
+	key := cacheKey{hours: hours, successOnly: successOnly, service: service, model: model}
 	h.mu.Lock()
 	if ce, ok := h.entries[key]; ok && h.now().Before(ce.expires) {
 		payload := ce.payload
@@ -113,8 +135,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 
-	rows, err := h.q.Leaderboard(r.Context(), hours, service, model)
-	if err != nil {
+	// Both aggregates come from the same store; run them in parallel. The
+	// perf query is load-bearing (503 on failure), while a usage failure
+	// only drops the usage section — the leaderboard must not depend on the
+	// newer pipe being healthy.
+	var (
+		rows  []Row
+		lerr  error
+		urows []UsageRow
+		uerr  error
+	)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		rows, lerr = h.q.Leaderboard(r.Context(), hours, service, model)
+	}()
+	if h.u != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			urows, uerr = h.u.TokenUsage(r.Context(), windowDays(hours), service, model, successOnly)
+		}()
+	}
+	wg.Wait()
+	if lerr != nil {
 		// Aggregate store unavailable: generic 503, never blank success.
 		httputil.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "leaderboard temporarily unavailable"})
 		return
@@ -143,6 +188,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			TTFTP99Ms:       row.TTFTP99Ms,
 		})
 	}
+	if h.u != nil {
+		payload.WindowDays = windowDays(hours)
+		payload.SuccessOnly = &successOnly
+		if uerr == nil {
+			payload.Usage = make([]usageEntry, 0, len(urows))
+			for _, row := range urows {
+				payload.Usage = append(payload.Usage, usageEntry{
+					Day:               row.Day,
+					Model:             row.Model,
+					Requests:          row.Requests,
+					InputTokens:       row.InputTokens,
+					CachedInputTokens: row.CachedInputTokens,
+					OutputTokens:      row.OutputTokens,
+				})
+			}
+		}
+		// uerr != nil: the usage section is omitted and the degraded
+		// response is cached for ttl — bounded staleness instead of
+		// unthrottled re-querying while the pipe recovers.
+	}
 
 	h.mu.Lock()
 	// Opportunistic sweep keeps the map bounded without a janitor goroutine.
@@ -167,6 +232,16 @@ func parseHours(raw string) (int, error) {
 		return 0, strconv.ErrSyntax
 	}
 	return hours, nil
+}
+
+func parseSuccessOnly(raw string) (bool, error) {
+	switch raw {
+	case "", "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	}
+	return false, errors.New("invalid success_only (expected 0 or 1)")
 }
 
 // validFilter keeps query interpolation injection-free by construction: only

@@ -37,91 +37,115 @@ func usageFixture() []UsageRow {
 	}
 }
 
-func TestUsageHandlerDefaultsAndShape(t *testing.T) {
-	q := &fakeUsageQuerier{rows: usageFixture()}
-	h := NewUsage(q, time.Minute)
+func TestWindowDays(t *testing.T) {
+	for hours, want := range map[int]int{1: 1, 24: 1, 25: 2, 168: 7, 720: 30} {
+		if got := windowDays(hours); got != want {
+			t.Errorf("windowDays(%d) = %d, want %d", hours, got, want)
+		}
+	}
+}
 
-	rec := do(h, "/v1/token-usage")
+func TestLeaderboardWithUsage(t *testing.T) {
+	q := &fakeQuerier{rows: leaderboardFixture()}
+	u := &fakeUsageQuerier{rows: usageFixture()}
+	h := NewWithUsage(q, u, time.Minute)
+
+	rec := do(h, "/v1/leaderboard?hours=48&success_only=0&service=chat&model=gpt-4o")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d", rec.Code)
 	}
-	if q.gotDays != defaultWindowDays || q.gotSuccess != true || q.gotSvc != "" || q.gotModel != "" {
-		t.Errorf("querier args = %d/%q/%q/%v", q.gotDays, q.gotSvc, q.gotModel, q.gotSuccess)
+	if u.gotDays != 2 || u.gotSuccess != false || u.gotSvc != "chat" || u.gotModel != "gpt-4o" {
+		t.Errorf("usage querier args = %d/%q/%q/%v", u.gotDays, u.gotSvc, u.gotModel, u.gotSuccess)
 	}
 	var payload struct {
 		GeneratedAt string `json:"generated_at"`
+		WindowHours int    `json:"window_hours"`
 		WindowDays  int    `json:"window_days"`
 		SuccessOnly bool   `json:"success_only"`
 		Entries     []struct {
+			GPUModel string `json:"gpu_model"`
+		} `json:"entries"`
+		Usage []struct {
 			Day               string `json:"day"`
 			Model             string `json:"model"`
 			Requests          uint64 `json:"requests"`
 			InputTokens       uint64 `json:"input_tokens"`
 			CachedInputTokens uint64 `json:"cached_input_tokens"`
 			OutputTokens      uint64 `json:"output_tokens"`
-		} `json:"entries"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
-	if payload.WindowDays != 30 || payload.SuccessOnly != true {
-		t.Errorf("window/success = %d/%v", payload.WindowDays, payload.SuccessOnly)
+	if payload.WindowHours != 48 || payload.WindowDays != 2 || payload.SuccessOnly != false {
+		t.Errorf("windows/success = %d/%d/%v", payload.WindowHours, payload.WindowDays, payload.SuccessOnly)
 	}
-	if len(payload.Entries) != 2 ||
-		payload.Entries[0].Day != "2026-09-18" || payload.Entries[0].Model != "glm-5.3-flash" ||
-		payload.Entries[0].Requests != 91 || payload.Entries[0].InputTokens != 9143051 ||
-		payload.Entries[0].CachedInputTokens != 40 || payload.Entries[0].OutputTokens != 81945 {
+	if len(payload.Entries) != 1 || payload.Entries[0].GPUModel != "NVIDIA GeForce RTX 4090" {
 		t.Errorf("entries = %+v", payload.Entries)
 	}
-	if payload.GeneratedAt == "" {
-		t.Error("generated_at empty")
+	if len(payload.Usage) != 2 ||
+		payload.Usage[0].Day != "2026-09-18" || payload.Usage[0].Requests != 91 ||
+		payload.Usage[0].InputTokens != 9143051 || payload.Usage[0].CachedInputTokens != 40 ||
+		payload.Usage[0].OutputTokens != 81945 {
+		t.Errorf("usage = %+v", payload.Usage)
 	}
 }
 
-func TestUsageHandlerParams(t *testing.T) {
-	q := &fakeUsageQuerier{rows: usageFixture()}
-	h := NewUsage(q, time.Minute)
-
-	rec := do(h, "/v1/token-usage?days=7&success_only=0&service=chat&model=gpt-4o")
+func TestLeaderboardWithoutUsageOmitsSection(t *testing.T) {
+	h := New(&fakeQuerier{rows: leaderboardFixture()}, time.Minute)
+	rec := do(h, "/v1/leaderboard?hours=168")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d", rec.Code)
 	}
-	if q.gotDays != 7 || !q.gotSuccess == false || q.gotSvc != "chat" || q.gotModel != "gpt-4o" {
-		t.Errorf("querier args = %d/%q/%q/%v", q.gotDays, q.gotSvc, q.gotModel, q.gotSuccess)
-	}
-
-	for _, target := range []string{
-		"/v1/token-usage?days=0",
-		"/v1/token-usage?days=31",
-		"/v1/token-usage?days=abc",
-		"/v1/token-usage?success_only=yes",
-		"/v1/token-usage?model=bad%20name",
-		"/v1/token-usage?service=%3Cscript%3E",
-	} {
-		if rec := do(h, target); rec.Code != http.StatusBadRequest {
-			t.Errorf("%s: code = %d, want 400", target, rec.Code)
+	body := rec.Body.String()
+	for _, key := range []string{`"usage"`, `"window_days"`, `"success_only"`} {
+		if strings.Contains(body, key) {
+			t.Errorf("perf-only response carries %s: %s", key, body)
 		}
 	}
 }
 
-func TestUsageHandlerCachesPerWindow(t *testing.T) {
-	q := &fakeUsageQuerier{rows: usageFixture()}
-	h := NewUsage(q, time.Minute)
-	do(h, "/v1/token-usage?days=7")
-	do(h, "/v1/token-usage?days=7")
-	if q.calls != 1 {
-		t.Fatalf("calls = %d, want 1 (cache)", q.calls)
+func TestLeaderboardUsageDegradesGracefully(t *testing.T) {
+	h := NewWithUsage(&fakeQuerier{rows: leaderboardFixture()}, &fakeUsageQuerier{err: errors.New("pipe down")}, time.Minute)
+	rec := do(h, "/v1/leaderboard")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage failure must not fail the leaderboard, code = %d", rec.Code)
 	}
-	do(h, "/v1/token-usage?days=7&success_only=0")
-	if q.calls != 2 {
-		t.Fatalf("calls = %d, want 2 (success_only is a distinct key)", q.calls)
+	if strings.Contains(rec.Body.String(), `"usage": [`) || strings.Contains(rec.Body.String(), `"usage":[`) {
+		t.Fatalf("degraded response must omit usage: %s", rec.Body.String())
+	}
+	var payload struct {
+		Entries []json.RawMessage `json:"entries"`
+		Usage   []json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(payload.Entries) != 1 || payload.Usage != nil {
+		t.Errorf("entries = %d, usage = %v", len(payload.Entries), payload.Usage)
 	}
 }
 
-func TestUsageHandlerQuerierErrorIs503(t *testing.T) {
-	h := NewUsage(&fakeUsageQuerier{err: errors.New("down")}, time.Minute)
-	if rec := do(h, "/v1/token-usage"); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("code = %d, want 503", rec.Code)
+func TestLeaderboardUsageCacheKeys(t *testing.T) {
+	q := &fakeQuerier{rows: leaderboardFixture()}
+	u := &fakeUsageQuerier{rows: usageFixture()}
+	h := NewWithUsage(q, u, time.Minute)
+
+	do(h, "/v1/leaderboard?hours=48")
+	do(h, "/v1/leaderboard?hours=48")
+	if u.calls != 1 || q.calls != 1 {
+		t.Fatalf("calls = %d/%d, want 1/1 (cache)", q.calls, u.calls)
+	}
+	do(h, "/v1/leaderboard?hours=48&success_only=0")
+	if u.calls != 2 {
+		t.Fatalf("usage calls = %d, want 2 (success_only is a distinct key)", u.calls)
+	}
+}
+
+func TestLeaderboardBadSuccessOnly(t *testing.T) {
+	h := NewWithUsage(&fakeQuerier{}, &fakeUsageQuerier{}, time.Minute)
+	if rec := do(h, "/v1/leaderboard?success_only=yes"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
 	}
 }
 

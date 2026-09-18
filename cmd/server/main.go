@@ -204,11 +204,10 @@ func run() error {
 
 	// GPU performance pipeline (optional): sample every routed response into
 	// the configured analytics store (Tinybird Forward, or self-managed
-	// ClickHouse) and serve the anonymized aggregates at /v1/leaderboard and
-	// /v1/token-usage.
+	// ClickHouse) and serve the anonymized leaderboard — performance
+	// percentiles plus the daily token-usage section — at /v1/leaderboard.
 	var perfHook func(*http.Response) error
 	var leaderboardHandler http.Handler
-	var usageHandler http.Handler
 	var sink interface {
 		perf.Recorder
 		Run(context.Context)
@@ -216,15 +215,19 @@ func run() error {
 	switch {
 	case cfg.TinybirdAppendToken != "":
 		s := perf.NewTinybirdSink(cfg.TinybirdHost, cfg.TinybirdAppendToken, cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
-		sink, leaderboardHandler = s, leaderboard.New(leaderboard.NewTinybird(cfg.TinybirdHost, cfg.TinybirdLeaderboard), cfg.LeaderboardCacheTTL)
+		lq := leaderboard.NewTinybird(cfg.TinybirdHost, cfg.TinybirdLeaderboard)
+		sink = s
 		if cfg.TinybirdUsageToken != "" {
-			usageHandler = leaderboard.NewUsage(leaderboard.NewUsageTinybird(cfg.TinybirdHost, cfg.TinybirdUsageToken), cfg.LeaderboardCacheTTL)
+			leaderboardHandler = leaderboard.NewWithUsage(lq, leaderboard.NewUsageTinybird(cfg.TinybirdHost, cfg.TinybirdUsageToken), cfg.LeaderboardCacheTTL)
+		} else {
+			leaderboardHandler = leaderboard.New(lq, cfg.LeaderboardCacheTTL)
 		}
 		log.Printf("GPU performance pipeline enabled (Tinybird %s)", cfg.TinybirdHost.Host)
 	case cfg.ClickHouseURL != nil:
 		s := perf.NewClickHouseSink(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword, cfg.PerfFlushInterval, cfg.PerfBatchSize, cfg.PerfQueueSize)
-		sink, leaderboardHandler = s, leaderboard.New(leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword), cfg.LeaderboardCacheTTL)
-		usageHandler = leaderboard.NewUsage(leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword), cfg.LeaderboardCacheTTL)
+		ch := leaderboard.NewClickHouse(cfg.ClickHouseURL, cfg.ClickHouseDatabase, cfg.ClickHouseUsername, cfg.ClickHousePassword)
+		sink = s
+		leaderboardHandler = leaderboard.NewWithUsage(ch, ch, cfg.LeaderboardCacheTTL)
 		log.Printf("GPU performance pipeline enabled (ClickHouse %s, database %s)", cfg.ClickHouseURL.Host, cfg.ClickHouseDatabase)
 	}
 	var sweeperDone chan struct{}
@@ -413,7 +416,7 @@ func run() error {
 			solrpcproxy.WithLogger(func(format string, args ...any) { log.Printf("solrpc: "+format, args...) }),
 		)
 	}
-	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, usageHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue, solRPCHandler)
+	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue, solRPCHandler)
 	if cfg.BillingMode != config.BillingOff {
 		log.Printf("billing mode %s (output token max %d)", cfg.BillingMode, cfg.BillingOutputMax)
 	}
