@@ -2,12 +2,12 @@ package faucetapi
 
 import (
 	"context"
-	"strings"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
