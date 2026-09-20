@@ -56,6 +56,11 @@ type statusResponse struct {
 	ClaimedAt     *time.Time `json:"claimed_at,omitempty"`
 	Wallet        string     `json:"wallet,omitempty"`
 	TxSignature   string     `json:"tx_signature,omitempty"`
+	// Funded reports whether the faucet wallet can afford one payout right
+	// now (nil when the check could not run, e.g. the Solana RPC is down).
+	Funded *bool `json:"funded,omitempty"`
+	// FaucetWallet is the on-chain address that pays claims; funding goes here.
+	FaucetWallet string `json:"faucet_wallet,omitempty"`
 }
 
 func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +78,14 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 		out.ClaimedAt = &claim.ClaimedAt
 		out.Wallet = claim.Wallet
 		out.TxSignature = claim.TxSignature
+	}
+	if s.faucet != nil {
+		out.FaucetWallet = s.faucet.FaucetWallet()
+		if check, err := s.faucet.CheckFunded(r.Context()); err != nil {
+			log.Printf("faucet: status fund check failed: %v", err)
+		} else {
+			out.Funded = &check.Funded
+		}
 	}
 	httputil.WriteJSON(w, http.StatusOK, out)
 }
@@ -92,6 +105,21 @@ func (s *Service) handleClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.emailVerified(r) {
 		http.Error(w, "email must be verified to claim from the faucet", http.StatusForbidden)
+		return
+	}
+	// Affordability pre-check: fail fast with a clear message when the faucet
+	// wallet cannot pay for the transfer, instead of reserving a claim row and
+	// then rolling it back after the on-chain send fails. An RPC hiccup here
+	// is logged but not fatal — the send path still guards the same failure.
+	if check, err := s.faucet.CheckFunded(r.Context()); err != nil {
+		log.Printf("faucet: fund pre-check failed: %v", err)
+	} else if !check.Funded {
+		log.Printf(
+			"faucet: wallet %s underfunded: token %d/%d raw, lamports %d/%d",
+			s.faucet.FaucetWallet(), check.TokenRaw, check.NeededTokenRaw,
+			check.Lamports, check.NeededLamports,
+		)
+		http.Error(w, "faucet wallet underfunded — the operator must top it up", http.StatusServiceUnavailable)
 		return
 	}
 	userID, _ := principal.UserID(r.Context())

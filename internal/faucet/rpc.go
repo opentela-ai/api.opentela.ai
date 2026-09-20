@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"fmt"
 	"io"
 	"net/http"
@@ -142,6 +143,78 @@ func (c *rpcClient) sendTransaction(ctx context.Context, wire []byte) (string, e
 	}
 	if out.Result == "" {
 		return "", fmt.Errorf("faucet: solana rpc returned an empty signature")
+	}
+	return out.Result, nil
+}
+
+// balanceResponse matches getBalance (lamports of an account).
+type balanceResponse struct {
+	Result struct {
+		Value uint64 `json:"value"`
+	} `json:"result"`
+	Error *rpcError `json:"error"`
+}
+
+// solBalance returns the lamports held by an account (0 if it does not exist).
+func (c *rpcClient) solBalance(ctx context.Context, pubkey []byte) (uint64, error) {
+	var out balanceResponse
+	if err := c.call(ctx, "getBalance", []any{solana.EncodeBase58(pubkey)}, &out); err != nil {
+		return 0, err
+	}
+	if out.Error != nil {
+		return 0, fmt.Errorf("faucet: solana rpc error (%d): %s", out.Error.Code, out.Error.Message)
+	}
+	return out.Result.Value, nil
+}
+
+// tokenBalanceResponse matches getTokenAccountBalance (uiTokenAmount carries
+// the raw integer amount string).
+type tokenBalanceResponse struct {
+	Result struct {
+		Value struct {
+			Amount string `json:"amount"`
+		} `json:"value"`
+	} `json:"result"`
+	Error *rpcError `json:"error"`
+}
+
+// tokenBalance returns the raw integer token balance of a token account
+// (0 when the account does not exist yet).
+func (c *rpcClient) tokenBalance(ctx context.Context, ata []byte) (uint64, error) {
+	var out tokenBalanceResponse
+	if err := c.call(ctx, "getTokenAccountBalance", []any{solana.EncodeBase58(ata)}, &out); err != nil {
+		return 0, err
+	}
+	if out.Error != nil {
+		// A missing token account reports an RPC-level error; that is simply
+		// a zero balance for our purposes.
+		return 0, nil
+	}
+	raw, ok := new(big.Int).SetString(out.Result.Value.Amount, 10)
+	if !ok {
+		return 0, fmt.Errorf("faucet: invalid token balance %q", out.Result.Value.Amount)
+	}
+	if !raw.IsUint64() {
+		return 0, fmt.Errorf("faucet: token balance %s overflows uint64", raw)
+	}
+	return raw.Uint64(), nil
+}
+
+// rentResponse matches getMinimumBalanceForRentExemption.
+type rentResponse struct {
+	Result uint64    `json:"result"`
+	Error  *rpcError `json:"error"`
+}
+
+// rentExemptMinimum returns the lamports required for a rent-exempt account
+// of dataLen bytes.
+func (c *rpcClient) rentExemptMinimum(ctx context.Context, dataLen uint64) (uint64, error) {
+	var out rentResponse
+	if err := c.call(ctx, "getMinimumBalanceForRentExemption", []any{dataLen}, &out); err != nil {
+		return 0, err
+	}
+	if out.Error != nil {
+		return 0, fmt.Errorf("faucet: solana rpc error (%d): %s", out.Error.Code, out.Error.Message)
 	}
 	return out.Result, nil
 }

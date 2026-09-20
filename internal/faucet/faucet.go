@@ -101,3 +101,56 @@ func (s *Service) Send(ctx context.Context, recipientOwner string) (string, erro
 	}
 	return sig, nil
 }
+
+// Solana cost constants for the affordability pre-check.
+const (
+	// Base transaction fee for a signed transaction (per-signature).
+	txBaseFeeLamports = 5_000
+	// SPL token account data length (165 bytes) — the worst case is the
+	// recipient ATA not existing yet and the faucet paying its rent.
+	tokenAccountDataLen = 165
+)
+
+// FundCheck reports whether the faucet wallet can afford one payout right
+// now. NeededLamports assumes the worst case (the recipient's associated
+// token account does not exist and its rent must be paid from the faucet's
+// SOL) on top of the base transaction fee.
+type FundCheck struct {
+	TokenRaw       uint64 // OTELA (raw) held by the faucet wallet
+	Lamports       uint64 // SOL (lamports) held by the faucet wallet
+	NeededTokenRaw uint64 // one payout in raw units
+	NeededLamports uint64 // base fee + worst-case recipient ATA rent
+	Funded         bool
+}
+
+// CheckFunded queries the faucet wallet's current OTELA and SOL balances and
+// compares them against the cost of a single payout. RPC failures bubble up;
+// callers decide whether to fail closed or skip the check.
+func (s *Service) CheckFunded(ctx context.Context) (FundCheck, error) {
+	sourceATA, err := associatedTokenAddress(s.faucetPub, s.mint, s.tokenProgram)
+	if err != nil {
+		return FundCheck{}, fmt.Errorf("faucet: derive faucet ata: %w", err)
+	}
+
+	tokenRaw, err := s.rpc.tokenBalance(ctx, sourceATA)
+	if err != nil {
+		return FundCheck{}, err
+	}
+	lamports, err := s.rpc.solBalance(ctx, s.faucetPub)
+	if err != nil {
+		return FundCheck{}, err
+	}
+	rent, err := s.rpc.rentExemptMinimum(ctx, tokenAccountDataLen)
+	if err != nil {
+		return FundCheck{}, err
+	}
+
+	needed := FundCheck{
+		TokenRaw:       tokenRaw,
+		Lamports:       lamports,
+		NeededTokenRaw: s.amountRaw,
+		NeededLamports: txBaseFeeLamports + rent,
+	}
+	needed.Funded = tokenRaw >= s.amountRaw && lamports >= needed.NeededLamports
+	return needed, nil
+}

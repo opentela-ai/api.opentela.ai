@@ -2,6 +2,7 @@ package faucetapi
 
 import (
 	"context"
+	"strings"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -88,12 +89,14 @@ func (f *fakeStore) ListWalletsByUser(ctx context.Context, accountID string) ([]
 // When ataExists is false, getAccountInfo reports a missing account so the
 // faucet builds a create-associated-token-account instruction before the
 // transfer.
-func solanaRPCServer(t *testing.T, ataExists ...bool) *httptest.Server {
+// solanaRPCServer serves canned JSON-RPC responses for the faucet's calls.
+// When ataExists is false, getAccountInfo reports a missing account so the
+// faucet builds a create-associated-token-account instruction before the
+// transfer. When underfunded is true, the balances reported for the faucet
+// wallet are zero so the affordability pre-check fails.
+func solanaRPCServer(t *testing.T, ataExists bool, underfunded bool) *httptest.Server {
 	t.Helper()
-	exists := true
-	if len(ataExists) > 0 {
-		exists = ataExists[0]
-	}
+	exists := ataExists
 	blockhash := "DpvKbXobmX6cS6kXJ9pFVxMD1Z8WHTDGQjzFqLxWQm1y" // 32 bytes base58
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -116,6 +119,23 @@ func solanaRPCServer(t *testing.T, ataExists ...bool) *httptest.Server {
 			}
 		case "sendTransaction":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"3nzFcLxM8FZXkz1V2c1cXKqHK7pFh9rQbJhBz1q1q1q1"}`))
+		case "getTokenAccountBalance":
+			amount := "1000000000000" // plenty for the pre-check
+			if underfunded {
+				amount = "0"
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":1},"value":{"amount":%q,"decimals":9,"uiAmount":0,"uiAmountString":"0"}}}`,
+				amount)))
+		case "getBalance":
+			lamports := uint64(100000000) // plenty for fees + worst-case rent
+			if underfunded {
+				lamports = 0
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":1},"value":%d}}`, lamports)))
+		case "getMinimumBalanceForRentExemption":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":2039280}`))
 		default:
 			t.Errorf("unexpected rpc method %q", req.Method)
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}`))
@@ -128,6 +148,12 @@ func solanaRPCServer(t *testing.T, ataExists ...bool) *httptest.Server {
 // When ataMissing is true the canned RPC reports the recipient's associated
 // token account as absent, forcing the faucet to create it first.
 func newTestService(t *testing.T, fs *fakeStore, enabled bool, verified bool, ataMissing ...bool) http.Handler {
+	return newTestServiceOpts(t, fs, enabled, verified, serviceOpts{ataMissing: len(ataMissing) > 0 && ataMissing[0]})
+}
+
+type serviceOpts struct{ ataMissing, underfunded bool }
+
+func newTestServiceOpts(t *testing.T, fs *fakeStore, enabled bool, verified bool, opts serviceOpts) http.Handler {
 	t.Helper()
 	var svc *faucet.Service
 	if enabled {
@@ -135,8 +161,7 @@ func newTestService(t *testing.T, fs *fakeStore, enabled bool, verified bool, at
 		if err != nil {
 			t.Fatal(err)
 		}
-		missing := len(ataMissing) > 0 && ataMissing[0]
-		rpcSrv := solanaRPCServer(t, !missing)
+		rpcSrv := solanaRPCServer(t, !opts.ataMissing, opts.underfunded)
 		t.Cleanup(rpcSrv.Close)
 		svc, err = faucet.New(rpcSrv.URL, testMintB58, testSPLB58, priv, 1_000_000_000)
 		if err != nil {
@@ -345,5 +370,23 @@ func TestFormatAmount(t *testing.T) {
 		if got := formatAmount(c.raw, c.decimals); got != c.want {
 			t.Errorf("formatAmount(%d, %d) = %q, want %q", c.raw, c.decimals, got, c.want)
 		}
+	}
+}
+
+func TestClaimUnderfundedFailsFast(t *testing.T) {
+	fs := newFakeStore()
+	fs.wallets["user-1"] = []store.WalletInfo{{Wallet: "wyXQMgDFSzHvCwz1aK79r6Qr5BxqxKFK4Ra8u7xPBhz", Primary: true}}
+	h := newTestServiceOpts(t, fs, true, true, serviceOpts{underfunded: true})
+
+	rec := doRequest(t, h, http.MethodPost)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "underfunded") {
+		t.Fatalf("body = %q, want an underfunded message", body)
+	}
+	// The claim must NOT be reserved: a retry after the top-up should work.
+	if len(fs.claims) != 0 {
+		t.Fatalf("claim reserved despite pre-check: %+v", fs.claims)
 	}
 }
