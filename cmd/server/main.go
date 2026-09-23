@@ -21,6 +21,7 @@ import (
 	"github.com/opentela-ai/api/internal/catalog"
 	"github.com/opentela-ai/api/internal/config"
 	"github.com/opentela-ai/api/internal/delegations"
+	"github.com/opentela-ai/api/internal/deploykeys"
 	"github.com/opentela-ai/api/internal/deposits"
 	"github.com/opentela-ai/api/internal/faucet"
 	"github.com/opentela-ai/api/internal/faucetapi"
@@ -103,6 +104,8 @@ func run() error {
 	var nodeIssue http.Handler
 	var nodePricingChallenge http.Handler
 	var nodePricingIssue http.Handler
+	var linkChallenge http.Handler
+	var linkIssue http.Handler
 	meshClient := mesh.New(cfg.UpstreamURL)
 	if cfg.KeyMgmtEnabled {
 		verifier := neonauth.New(cfg.NeonAuthJWKSURL, cfg.NeonAuthIssuer, cfg.NeonAuthAudience, cfg.JWKSCacheTTL)
@@ -158,7 +161,11 @@ func run() error {
 		}
 		billingRoutes = billingapi.New(pg, cfg.BillingMode, treasuryATA, cfg.BillingTreasuryWallet, cfg.BillingDepositMint, cfg.BillingDepositTokenProgram, cfg.BillingDepositDecimals, withdrawalsEnabled, meshClient)
 		log.Printf("OTELA billing management at /manage/billing (mode %s)", cfg.BillingMode)
-		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, verifier, pg, cfg.CORSAllowedOrigins)
+		keyMgmt = manageapi.Router(svc, ws, instancesapi.New(pg, meshClient, cfg.IdentityMaxAge, cfg.OwnershipMaxAge), regionsapi.New(pg, meshClient, cfg.OwnershipMaxAge), faucetRoutes, billingRoutes, deploykeys.NewLinkService(pg, meshClient, cfg.OwnershipMaxAge, cfg.MaxDeployKeysPerUser), verifier, pg, cfg.CORSAllowedOrigins)
+		linkSvc := deploykeys.NewLinkService(pg, meshClient, cfg.OwnershipMaxAge, cfg.MaxDeployKeysPerUser)
+		linkChallenge = linkSvc.LinkChallengeHandler()
+		linkIssue = linkSvc.LinkHandler()
+		log.Printf("OTELA deploy-key management at /manage/deploy-keys; instance link at /internal/instances/link")
 		log.Printf("key management enabled at /manage/* (issuer %s)", cfg.NeonAuthIssuer)
 	}
 	var nodeVerifier *nodecred.Verifier
@@ -416,7 +423,7 @@ func run() error {
 			solrpcproxy.WithLogger(func(format string, args ...any) { log.Printf("solrpc: "+format, args...) }),
 		)
 	}
-	handler := server.NewWithBilling(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue, solRPCHandler)
+	handler := server.NewWithBillingOpts(validator, proxyHandler, keyMgmt, internalACL, internalACLv2, nodeChallenge, nodeIssue, catalogHandler, leaderboardHandler, cfg.CORSAllowedOrigins, billingOpts, billingGate, pricingHandler, nodePricingChallenge, nodePricingIssue, solRPCHandler, linkChallenge, linkIssue)
 	if cfg.BillingMode != config.BillingOff {
 		log.Printf("billing mode %s (output token max %d)", cfg.BillingMode, cfg.BillingOutputMax)
 	}

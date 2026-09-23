@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -215,14 +216,16 @@ func TestHandleReplaceACLSerializesRulesWithLowercaseKeys(t *testing.T) {
 }
 
 func TestHandlePatchReturnsConflictWhenOwnershipMismatches(t *testing.T) {
+	observed := "owner-wallet"
 	store := &storeStub{
 		instanceByID: store.InstanceInfo{
-			ID:          7,
-			AccountID:   "user-alice",
-			PeerID:      "peer-a",
-			Label:       "demo",
-			OwnerWallet: "owner-wallet",
-			AccessMode:  "restricted",
+			ID:             7,
+			AccountID:      "user-alice",
+			PeerID:         "peer-a",
+			Label:          "demo",
+			OwnerWallet:    "owner-wallet",
+			AccessMode:     "restricted",
+			ObservedWallet: &observed, // wallet-flow instances always carry the observation
 		},
 		updateOut: store.InstanceInfo{
 			ID:              7,
@@ -368,19 +371,78 @@ func TestHandleCreateReclaimsWhenAttestedWalletChangesToCallerWallet(t *testing.
 }
 
 func TestValidPeerIDRejectsControlAndNonASCIICharacters(t *testing.T) {
-	if validPeerID("peer id") {
+	if ValidPeerID("peer id") {
 		t.Fatal("validPeerID accepted whitespace")
 	}
-	if validPeerID("peer-\u2603") {
+	if ValidPeerID("peer-\u2603") {
 		t.Fatal("validPeerID accepted non-ASCII")
 	}
-	if validPeerID("peer-123") {
+	if ValidPeerID("peer-123") {
 		t.Fatal("validPeerID accepted ASCII text that is not a multihash")
 	}
-	if !validPeerID(validTestPeerID) {
+	if !ValidPeerID(validTestPeerID) {
 		t.Fatal("validPeerID rejected canonical Ed25519 peer ID")
 	}
-	if !validPeerID("QmSxh8s3UqmSXBa9SLLREKGAQ6DYCmaeCHeBDdzpJDgn45") {
+	if !ValidPeerID("QmSxh8s3UqmSXBa9SLLREKGAQ6DYCmaeCHeBDdzpJDgn45") {
 		t.Fatal("validPeerID rejected canonical legacy SHA-256 peer ID")
+	}
+}
+
+// Deploy-key-linked instances (no wallet observation) must be manageable
+// without any mesh presence: ownership was established by the libp2p
+// challenge flow, so the mesh cross-check in requireCurrentOwnership must
+// be skipped entirely — a mesh outage or a privacy-first node that never
+// broadcasts an owner wallet must not 409 management operations.
+func TestPatchDeployKeyInstanceSkipsMeshOwnershipCheck(t *testing.T) {
+	st := &storeStub{
+		instanceByID: store.InstanceInfo{
+			ID: 3, AccountID: "user-alice", PeerID: validTestPeerID,
+			AccessMode: "restricted", OwnershipStatus: "active",
+			ObservedWallet: nil, // deploy-key linked
+		},
+		updateOut: store.InstanceInfo{
+			ID: 3, AccountID: "user-alice", PeerID: validTestPeerID,
+			Label: "renamed", AccessMode: "restricted", OwnershipStatus: "active",
+		},
+	}
+	mesh := &meshStub{lookupErr: errors.New("mesh unreachable")}
+	svc := New(st, mesh, time.Hour, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPatch, "/manage/instances/3", bytes.NewBufferString(`{"label":"renamed"}`))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	authedRoutes(t, svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if mesh.lookupCalls != 0 {
+		t.Fatalf("mesh lookup calls=%d, want 0 for deploy-key instances", mesh.lookupCalls)
+	}
+}
+
+// Wallet-observed instances keep the strict behavior: mesh absence still
+// marks the instance unavailable and blocks the operation.
+func TestPatchWalletInstanceStillRequiresMesh(t *testing.T) {
+	observed := "WALLET"
+	st := &storeStub{
+		instanceByID: store.InstanceInfo{
+			ID: 4, AccountID: "user-alice", PeerID: validTestPeerID,
+			AccessMode: "restricted", OwnershipStatus: "active",
+			ObservedWallet: &observed,
+		},
+	}
+	mesh := &meshStub{lookupErr: errors.New("mesh unreachable")}
+	svc := New(st, mesh, time.Hour, time.Minute)
+
+	req := httptest.NewRequest(http.MethodPatch, "/manage/instances/4", bytes.NewBufferString(`{"label":"renamed"}`))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	authedRoutes(t, svc).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("code=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
 }

@@ -38,13 +38,14 @@ type Config struct {
 
 	// Key-management plane (optional). Enabled only when both NeonAuthJWKSURL and
 	// NeonAuthIssuer are set.
-	NeonAuthJWKSURL    string
-	NeonAuthIssuer     string
-	NeonAuthAudience   string
-	JWKSCacheTTL       time.Duration
-	MaxKeysPerUser     int
-	CORSAllowedOrigins []string
-	KeyMgmtEnabled     bool
+	NeonAuthJWKSURL      string
+	NeonAuthIssuer       string
+	NeonAuthAudience     string
+	JWKSCacheTTL         time.Duration
+	MaxKeysPerUser       int
+	MaxDeployKeysPerUser int
+	CORSAllowedOrigins   []string
+	KeyMgmtEnabled       bool
 
 	InternalControlToken string
 	IdentityMaxAge       time.Duration
@@ -252,6 +253,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	maxKeys, err := intEnv("MAX_KEYS_PER_USER", 10)
+	if err != nil {
+		return nil, err
+	}
+	maxDeployKeys, err := intEnv("MAX_DEPLOY_KEYS_PER_USER", 20)
 	if err != nil {
 		return nil, err
 	}
@@ -619,6 +624,7 @@ func Load() (*Config, error) {
 		NeonAuthAudience:               os.Getenv("NEON_AUTH_AUDIENCE"),
 		JWKSCacheTTL:                   jwksTTL,
 		MaxKeysPerUser:                 maxKeys,
+		MaxDeployKeysPerUser:           maxDeployKeys,
 		CORSAllowedOrigins:             corsOrigins,
 		KeyMgmtEnabled:                 jwksURL != "" && issuer != "",
 		InternalControlToken:           internalControlToken,
