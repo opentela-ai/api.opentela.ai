@@ -674,18 +674,33 @@ func (s *Service) applyServiceACL(ctx context.Context, principalState *principal
 func (s *Service) applyRules(ctx context.Context, principalState *principalContext, ownerAccountID string, rules []store.ACLRule, now time.Time) (bool, string, int, error) {
 	matched := false
 	var enrichmentErr error
+	// api_key rules match the caller's non-secret key prefix (sk- + 8 hex);
+	// no principal enrichment is required. Keep the existing reason strings:
+	// the node fleet whitelists decision reasons and fails closed on unknown
+	// ones, so a match must reuse "instance_acl_allow".
 	for _, rule := range rules {
-		if rule.Kind != "wallet" {
+		if rule.Kind != "api_key" {
 			continue
 		}
-		wallets, err := principalState.walletSetValue(ctx, s.store)
-		if err != nil {
-			enrichmentErr = err
-			break
-		}
-		if _, ok := wallets[rule.Value]; ok {
+		if principalState.key.KeyPrefix != "" && principalState.key.KeyPrefix == rule.Value {
 			matched = true
 			break
+		}
+	}
+	if !matched {
+		for _, rule := range rules {
+			if rule.Kind != "wallet" {
+				continue
+			}
+			wallets, err := principalState.walletSetValue(ctx, s.store)
+			if err != nil {
+				enrichmentErr = err
+				break
+			}
+			if _, ok := wallets[rule.Value]; ok {
+				matched = true
+				break
+			}
 		}
 	}
 	if !matched {
