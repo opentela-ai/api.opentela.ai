@@ -180,9 +180,10 @@ type NodeCredentialChallenge struct {
 }
 
 type ActiveKey struct {
-	KeyID   int64
-	UserID  *string
-	KeyHash string
+	KeyID     int64
+	UserID    *string
+	KeyHash   string
+	KeyPrefix string
 }
 
 func (p *Postgres) RefreshIdentity(ctx context.Context, in IdentityInfo) error {
@@ -802,10 +803,10 @@ func (p *Postgres) ListInstanceRules(ctx context.Context, instanceID int64) ([]A
 func (p *Postgres) LookupActiveKey(ctx context.Context, keyHash string) (ActiveKey, error) {
 	var out ActiveKey
 	err := p.pool.QueryRow(ctx, `
-		SELECT id, user_id, key_hash
+		SELECT id, user_id, key_hash, COALESCE(key_prefix, '')
 		FROM api_keys
 		WHERE key_hash = $1 AND active = TRUE`, keyHash).
-		Scan(&out.KeyID, &out.UserID, &out.KeyHash)
+		Scan(&out.KeyID, &out.UserID, &out.KeyHash, &out.KeyPrefix)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActiveKey{}, ErrNotFound
 	}

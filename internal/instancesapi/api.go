@@ -425,6 +425,12 @@ func normalizeRules(in []store.ACLRule) ([]store.ACLRule, error) {
 				return nil, err
 			}
 			value = wallet
+		case "api_key":
+			prefix, err := normalizeKeyPrefix(value)
+			if err != nil {
+				return nil, err
+			}
+			value = prefix
 		default:
 			return nil, errors.New("invalid rule kind")
 		}
@@ -442,6 +448,23 @@ func normalizeRules(in []store.ACLRule) ([]store.ACLRule, error) {
 		return strings.Compare(a.Kind, b.Kind)
 	})
 	return out, nil
+}
+
+func normalizeKeyPrefix(v string) (string, error) {
+	v = strings.ToLower(v)
+	if len(v) != 11 || !strings.HasPrefix(v, "sk-") || !isLowerHex(v[3:]) {
+		return "", errors.New("api_key rules must be the non-secret key prefix: sk- plus 8 hex characters")
+	}
+	return v, nil
+}
+
+func isLowerHex(v string) bool {
+	for _, c := range v {
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validPeerID(v string) bool {

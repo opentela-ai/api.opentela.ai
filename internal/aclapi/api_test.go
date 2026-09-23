@@ -160,6 +160,52 @@ func TestEvaluateAllowsWalletMatchWhenEmailSnapshotIsStale(t *testing.T) {
 	}
 }
 
+func TestEvaluateAllowsApiKeyPrefixMatchWithoutEnrichment(t *testing.T) {
+	accountID := "user-alice"
+	store := &storeStub{
+		key:     store.ActiveKey{KeyID: 7, UserID: &accountID, KeyPrefix: "sk-deadbeef"},
+		managed: []store.InstanceInfo{{PeerID: "peer-a", AccountID: "user-owner", OwnerWallet: "owner-wallet", AccessMode: "restricted", Rules: []store.ACLRule{{Kind: "api_key", Value: "sk-deadbeef"}}}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC)},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluate(context.Background(), strings.Repeat("a", 64), []string{"peer-a"})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("evaluate status=%d err=%v, want 200 nil", status, err)
+	}
+	if len(resp.AllowedPeerIDs) != 1 || resp.AllowedPeerIDs[0] != "peer-a" {
+		t.Fatalf("allowed=%v, want peer-a", resp.AllowedPeerIDs)
+	}
+	if store.identityCalls != 0 || store.walletSetCalls != 0 {
+		t.Fatalf("enrichment ran: identity=%d walletSet=%d, want none", store.identityCalls, store.walletSetCalls)
+	}
+}
+
+func TestEvaluateDeniesApiKeyPrefixMismatch(t *testing.T) {
+	accountID := "user-alice"
+	store := &storeStub{
+		key:     store.ActiveKey{KeyID: 7, UserID: &accountID, KeyPrefix: "sk-aaaaaaaa"},
+		managed: []store.InstanceInfo{{PeerID: "peer-a", AccountID: "user-owner", OwnerWallet: "owner-wallet", AccessMode: "restricted", Rules: []store.ACLRule{{Kind: "api_key", Value: "sk-deadbeef"}}}},
+	}
+	mesh := &meshStub{observations: map[string]mesh.PeerObservation{
+		"peer-a": {PeerID: "peer-a", Wallet: "owner-wallet", ObservedAt: time.Date(2026, 7, 29, 11, 59, 30, 0, time.UTC)},
+	}}
+	svc := newServiceForTest(store, mesh)
+
+	resp, status, err := svc.evaluate(context.Background(), strings.Repeat("a", 64), []string{"peer-a"})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("evaluate status=%d err=%v, want 200 nil", status, err)
+	}
+	if len(resp.AllowedPeerIDs) != 0 {
+		t.Fatalf("allowed=%v, want none", resp.AllowedPeerIDs)
+	}
+	if len(resp.Denied) != 1 || resp.Denied[0].PeerID != "peer-a" || resp.Denied[0].Reason != "no_match" {
+		t.Fatalf("denied=%+v, want peer-a with no_match", resp.Denied)
+	}
+}
+
 func TestEvaluateDeniesOwnershipMismatch(t *testing.T) {
 	accountID := "user-alice"
 	store := &storeStub{
