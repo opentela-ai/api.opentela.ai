@@ -15,6 +15,7 @@ type InstanceRoutes interface{ Routes() http.Handler }
 type RegionRoutes interface{ Routes() http.Handler }
 type FaucetRoutes interface{ Routes() http.Handler }
 type BillingRoutes interface{ Routes() http.Handler }
+type DeployKeyRoutes interface{ ManageRoutes() http.Handler }
 
 type identityStore interface {
 	RefreshIdentity(ctx context.Context, in store.IdentityInfo) error
@@ -32,10 +33,15 @@ func (r identityRefresher) RefreshIdentity(ctx context.Context, p principal.Prin
 	})
 }
 
-func Router(keySvc keysapi.Service, wallets WalletRoutes, instances InstanceRoutes, regions RegionRoutes, faucetRoutes FaucetRoutes, billingRoutes BillingRoutes, v principal.Verifier, pg identityStore, corsOrigins []string) http.Handler {
+func Router(keySvc keysapi.Service, wallets WalletRoutes, instances InstanceRoutes, regions RegionRoutes, faucetRoutes FaucetRoutes, billingRoutes BillingRoutes, deployKeys DeployKeyRoutes, v principal.Verifier, pg identityStore, corsOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/manage/keys", keysapi.Routes(keySvc))
 	mux.Handle("/manage/keys/", keysapi.Routes(keySvc))
+	if deployKeys != nil {
+		h := deployKeys.ManageRoutes()
+		mux.Handle("/manage/deploy-keys", h)
+		mux.Handle("/manage/deploy-keys/", h)
+	}
 	if wallets != nil {
 		h := wallets.Routes()
 		mux.Handle("/manage/wallets", h)

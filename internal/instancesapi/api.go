@@ -126,7 +126,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peerID := strings.TrimSpace(req.PeerID)
-	if !validPeerID(peerID) {
+	if !ValidPeerID(peerID) {
 		http.Error(w, "invalid peer_id", http.StatusBadRequest)
 		return
 	}
@@ -354,6 +354,13 @@ func (s *Service) requireCurrentOwnership(w http.ResponseWriter, r *http.Request
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return store.InstanceInfo{}, false
 	}
+	if inst.ObservedWallet == nil {
+		// Deploy-key-linked instance: ownership was established by the
+		// libp2p challenge flow, not by a mesh wallet observation, so there
+		// is nothing to cross-check and a mesh absence is not a problem.
+		// (Privacy-first nodes may never broadcast an owner wallet.)
+		return inst, true
+	}
 	obs, err := s.mesh.LookupPeer(r.Context(), inst.PeerID)
 	if err != nil {
 		updated, upErr := s.store.UpdateInstanceMetadata(r.Context(), userID, id, inst.Label, inst.AccessMode, "unavailable", nil, nil)
@@ -467,7 +474,10 @@ func isLowerHex(v string) bool {
 	return true
 }
 
-func validPeerID(v string) bool {
+// ValidPeerID reports whether v is a well-formed libp2p peer ID. Exported
+// for the deploy-key link flow, which validates self-reported peer IDs the
+// same way the JWT-managed instance APIs do.
+func ValidPeerID(v string) bool {
 	if v == "" || len(v) > maxPeerIDLen {
 		return false
 	}

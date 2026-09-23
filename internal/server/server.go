@@ -58,6 +58,14 @@ func NewWithControlPlanes(v auth.TokenValidator, proxy http.Handler, keyMgmt htt
 // with the API-key middleware (the gate reads the owning account from
 // context), so callers pass the gate in place of the raw proxy.
 func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler, solRPC http.Handler) http.Handler {
+	return NewWithBillingOpts(v, proxy, keyMgmt, internalACLv1, internalACLv2, nodeChallenge, nodeIssue, catalog, leaderboard, corsOrigins, billing, billingGate, pricing, pricingChallenge, pricingIssue, solRPC, nil, nil)
+}
+
+// NewWithBillingOpts is NewWithBilling plus the deploy-key instance-link
+// planes (linkChallenge, linkIssue), when non-nil. These are node-facing:
+// the caller authenticates with a scoped deploy key (otd-...) minted in the
+// console, never with an account JWT.
+func NewWithBillingOpts(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Handler, internalACLv1 http.Handler, internalACLv2 http.Handler, nodeChallenge http.Handler, nodeIssue http.Handler, catalog http.Handler, leaderboard http.Handler, corsOrigins []string, billing auth.Options, billingGate http.Handler, pricing http.Handler, pricingChallenge http.Handler, pricingIssue http.Handler, solRPC http.Handler, linkChallenge http.Handler, linkIssue http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -86,6 +94,12 @@ func NewWithBilling(v auth.TokenValidator, proxy http.Handler, keyMgmt http.Hand
 	}
 	if pricingIssue != nil {
 		mux.Handle("/internal/pricing/issue", pricingIssue)
+	}
+	if linkChallenge != nil {
+		mux.Handle("/internal/instances/link/challenges", linkChallenge)
+	}
+	if linkIssue != nil {
+		mux.Handle("/internal/instances/link", linkIssue)
 	}
 	cors := corsmw.Middleware(corsOrigins)
 
