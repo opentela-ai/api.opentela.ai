@@ -409,8 +409,10 @@ func ValidPeerID(v string) bool {
 // ── console-facing CRUD (JWT principal middleware applied by manageapi) ──
 
 type createRequest struct {
-	Name    string `json:"name"`
-	MaxUses int    `json:"max_uses"`
+	Name string `json:"name"`
+	// MaxUses is the link budget: nil means the default finite budget,
+	// 0 means unlimited links (migration 0016), otherwise 1..MaxMaxUses.
+	MaxUses *int `json:"max_uses"`
 	// TTLSeconds is the key lifetime; 0 means no expiry. Bounded by
 	// MinTTL/MaxTTL in the service.
 	TTLSeconds int64 `json:"ttl_seconds"`
@@ -454,9 +456,9 @@ func (s *LinkService) ManageRoutes() http.Handler {
 			http.Error(w, "name too long", http.StatusBadRequest)
 			return
 		}
-		maxUses := req.MaxUses
-		if maxUses == 0 {
-			maxUses = defaultMaxUses
+		maxUses := defaultMaxUses
+		if req.MaxUses != nil {
+			maxUses = *req.MaxUses
 		}
 		var ttl time.Duration
 		if req.TTLSeconds != 0 {

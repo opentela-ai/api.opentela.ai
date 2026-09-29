@@ -26,8 +26,11 @@ var (
 )
 
 // Bounds for mint parameters. MinTTL keeps keys from being uselessly
-// ephemeral; MaxTTL keeps "forever" keys from accumulating; MaxUses keeps a
-// single leaked key from silently registering unbounded peers.
+// ephemeral; MaxTTL keeps TTL-bounded keys from creeping toward "forever"
+// (an explicit ttl of 0 is the sanctioned way to mint an expiry-free key);
+// maxUses of 0 means an unlimited link budget (the sanctioned way to skip
+// the cap), while positive maxUses is bounded by MaxMaxUses so a finite
+// budget can't silently grow.
 const (
 	MinTTL     = 5 * time.Minute
 	MaxTTL     = 90 * 24 * time.Hour
@@ -74,10 +77,11 @@ func Prefix(token string) string {
 }
 
 // Create mints a deploy key for userID. ttl may be zero for an
-// expiry-free key; maxUses must be within [MinMaxUses, MaxMaxUses]. The
-// plaintext is returned exactly once.
+// expiry-free key; maxUses may be zero for an unlimited link budget,
+// otherwise it must be within [MinMaxUses, MaxMaxUses]. The plaintext is
+// returned exactly once.
 func (s *Service) Create(ctx context.Context, userID, name string, maxUses int, ttl time.Duration) (string, store.DeployKeyInfo, error) {
-	if maxUses < MinMaxUses || maxUses > MaxMaxUses {
+	if maxUses < 0 || (maxUses > 0 && (maxUses < MinMaxUses || maxUses > MaxMaxUses)) {
 		return "", store.DeployKeyInfo{}, ErrInvalidMaxUses
 	}
 	if ttl < 0 || (ttl != 0 && ttl < MinTTL) || ttl > MaxTTL {

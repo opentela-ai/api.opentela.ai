@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/opentela-ai/api/internal/mesh"
+	"github.com/opentela-ai/api/internal/neonauth"
+	"github.com/opentela-ai/api/internal/principal"
 	"github.com/opentela-ai/api/internal/store"
 )
 
@@ -125,7 +129,16 @@ func (f *linkStoreFake) InsertDeployKey(_ context.Context, userID, keyHash, keyP
 	return k, nil
 }
 func (f *linkStoreFake) ListDeployKeysByUser(_ context.Context, userID string) ([]store.DeployKeyInfo, error) {
-	return nil, nil
+	var out []store.DeployKeyInfo
+	for _, k := range f.keys {
+		if k.UserID == userID {
+			out = append(out, k)
+		}
+	}
+	// Mirror the store's ORDER BY created_at DESC, id DESC (ids are
+	// monotonic in the fake, so sorting by id desc is equivalent).
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out, nil
 }
 func (f *linkStoreFake) CountActiveDeployKeysByUser(_ context.Context, userID string) (int, error) {
 	n := 0
@@ -360,6 +373,98 @@ func TestLinkRequiresLinkedWallet(t *testing.T) {
 	rec := runLink(t, svc, tok, peerID, sign, "")
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("no wallet: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// verifierStub satisfies principal.Verifier for manage-plane handler tests.
+type verifierStub struct{}
+
+func (verifierStub) Verify(context.Context, string) (neonauth.Claims, error) {
+	return neonauth.Claims{Subject: "user-alice"}, nil
+}
+
+// manageAuthed wraps ManageRoutes in the same principal middleware the
+// manage plane applies in production, so handler tests can act as a user.
+func manageAuthed(svc *LinkService) http.Handler {
+	return principal.Middleware(verifierStub{}, nil, nil)(svc.ManageRoutes())
+}
+
+func manageReq(t *testing.T, h http.Handler, method, target, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, rd)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestManageCreateUnlimitedUses(t *testing.T) {
+	svc := newTestService(t, newLinkStoreFake(), meshFake{})
+	h := manageAuthed(svc)
+
+	// max_uses: 0 mints an unlimited, expiry-free key (migration 0016).
+	rec := manageReq(t, h, http.MethodPost, "/manage/deploy-keys",
+		`{"name":"farm","max_uses":0,"ttl_seconds":0}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("unlimited create: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var created createResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.MaxUses != 0 {
+		t.Fatalf("created MaxUses=%d, want 0 (unlimited)", created.MaxUses)
+	}
+	if created.ExpiresAt != nil {
+		t.Fatalf("ttl_seconds=0 must mint an expiry-free key, got %v", created.ExpiresAt)
+	}
+
+	// An omitted max_uses keeps the historic finite default.
+	rec = manageReq(t, h, http.MethodPost, "/manage/deploy-keys", `{"name":"defaulted"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("default create: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var def createResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &def); err != nil {
+		t.Fatalf("decode default response: %v", err)
+	}
+	if def.MaxUses != defaultMaxUses {
+		t.Fatalf("omitted max_uses: MaxUses=%d, want %d", def.MaxUses, defaultMaxUses)
+	}
+
+	// Negative budgets stay invalid.
+	if rec := manageReq(t, h, http.MethodPost, "/manage/deploy-keys", `{"max_uses":-3}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative max_uses: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The list reports the unlimited key with uses_left = -1.
+	rec = manageReq(t, h, http.MethodGet, "/manage/deploy-keys", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var rows []deployKeyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("list rows=%d, want 2", len(rows))
+	}
+	var unlimited *deployKeyResponse
+	for i := range rows {
+		if rows[i].MaxUses == 0 {
+			unlimited = &rows[i]
+			break
+		}
+	}
+	if unlimited == nil {
+		t.Fatalf("no unlimited row in list: %+v", rows)
+	}
+	if unlimited.UsesLeft != -1 {
+		t.Fatalf("unlimited row uses_left=%d, want -1", unlimited.UsesLeft)
 	}
 }
 

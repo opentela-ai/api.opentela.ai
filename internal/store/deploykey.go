@@ -12,6 +12,7 @@ import (
 // DeployKeyInfo is a row of the deploy_keys table (migration 0015). The
 // plaintext token is never stored: KeyHash is the SHA-256 hex digest and
 // KeyPrefix is the non-secret display prefix ("otd-" + first 8 hex chars).
+// MaxUses == 0 means an unlimited link budget (migration 0016).
 type DeployKeyInfo struct {
 	ID         int64
 	UserID     string
@@ -28,9 +29,13 @@ type DeployKeyInfo struct {
 }
 
 // UsesLeft reports how many more successful links the key permits; -1 means
-// unlimited (a nil ExpiresAt makes the key expiry-free, but uses are always
-// finite: MaxUses >= 1 is a table constraint).
+// unlimited (MaxUses == 0, migration 0016). A nil ExpiresAt makes the key
+// expiry-free; an unlimited budget makes it link-count-free. Both kinds are
+// still revocable from the console.
 func (k DeployKeyInfo) UsesLeft() int {
+	if k.MaxUses == 0 {
+		return -1
+	}
 	return k.MaxUses - k.UseCount
 }
 
@@ -41,7 +46,8 @@ func (k DeployKeyInfo) Expired(now time.Time) bool {
 
 // Usable reports whether the key may complete another link right now.
 func (k DeployKeyInfo) Usable(now time.Time) bool {
-	return k.Active && k.RevokedAt == nil && !k.Expired(now) && k.UsesLeft() > 0
+	return k.Active && k.RevokedAt == nil && !k.Expired(now) &&
+		(k.MaxUses == 0 || k.UseCount < k.MaxUses)
 }
 
 const deployKeyColumns = `id, user_id, key_hash, key_prefix, name, max_uses, use_count,
@@ -145,14 +151,14 @@ func (p *Postgres) FindActiveDeployKey(ctx context.Context, keyHash string, now 
 // ConsumeDeployKeyUse atomically spends one use of the key, returning the
 // owning account id. The conditional UPDATE makes over-concurrency safe: two
 // simultaneous links racing for the last use cannot both win, and the loser
-// observes ErrNotFound.
+// observes ErrNotFound. max_uses = 0 skips the budget clause (unlimited).
 func (p *Postgres) ConsumeDeployKeyUse(ctx context.Context, keyHash string, now time.Time) (string, error) {
 	var userID string
 	err := p.pool.QueryRow(ctx, `
 		UPDATE deploy_keys SET use_count = use_count + 1, last_used_at = $2
 		WHERE key_hash = $1 AND active AND revoked_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > $2)
-		  AND use_count < max_uses
+		  AND (max_uses = 0 OR use_count < max_uses)
 		RETURNING user_id`, keyHash, now.UTC()).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrNotFound

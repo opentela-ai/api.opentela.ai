@@ -82,8 +82,8 @@ func TestCreateMintsOtdToken(t *testing.T) {
 
 func TestCreateRejectsBadBounds(t *testing.T) {
 	s := New(newFakeStore(5), 5)
-	if _, _, err := s.Create(context.Background(), "u", "n", 0, time.Hour); err != ErrInvalidMaxUses {
-		t.Fatalf("max_uses=0: %v", err)
+	if _, _, err := s.Create(context.Background(), "u", "n", -1, time.Hour); err != ErrInvalidMaxUses {
+		t.Fatalf("max_uses=-1: %v", err)
 	}
 	if _, _, err := s.Create(context.Background(), "u", "n", 101, time.Hour); err != ErrInvalidMaxUses {
 		t.Fatalf("max_uses=101: %v", err)
@@ -100,6 +100,26 @@ func TestCreateRejectsBadBounds(t *testing.T) {
 	}
 	if _, _, err := s.Create(context.Background(), "u", "n", 1, MinTTL); err != nil {
 		t.Fatalf("ttl=min: %v", err)
+	}
+}
+
+func TestCreateUnlimitedUses(t *testing.T) {
+	s := New(newFakeStore(5), 5)
+	_, info, err := s.Create(context.Background(), "u", "n", 0, 0)
+	if err != nil {
+		t.Fatalf("max_uses=0 (unlimited): %v", err)
+	}
+	if info.MaxUses != 0 {
+		t.Fatalf("MaxUses=%d, want 0", info.MaxUses)
+	}
+	if info.ExpiresAt != nil {
+		t.Fatalf("ttl=0 must leave ExpiresAt nil, got %v", info.ExpiresAt)
+	}
+	if left := info.UsesLeft(); left != -1 {
+		t.Fatalf("UsesLeft=%d, want -1 (unlimited)", left)
+	}
+	if !info.Usable(time.Now().UTC().Add(time.Hour)) {
+		t.Fatal("unlimited key must stay usable regardless of use count")
 	}
 }
 
